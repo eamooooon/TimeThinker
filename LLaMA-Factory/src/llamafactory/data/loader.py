@@ -322,6 +322,8 @@ def _get_preprocessed_dataset(
         **kwargs,
     )
 
+    # change to the below code if meet error, refer to https://github.com/tulerfeng/OneThinker/issues/10
+    
     # dataset = dataset.map(
     #     dataset_processor.preprocess_dataset,
     #     batched=True,
