@@ -1,4 +1,4 @@
-# OneThinker: All-in-one Reasoning Model for Image and Video [CVPR 2026]
+# OneThinker: All-in-one Reasoning Model for Image and Video (CVPR 2026)
 
 [[📖 Paper](https://arxiv.org/abs/2512.03043)] [[🤗 OneThinker-8B-model](https://huggingface.co/OneThink/OneThinker-8B)] [🤗[OneThinker-SFT-model](https://huggingface.co/OneThink/OneThinker-SFT-Qwen3-8B)] [[🤗 OneThinker-train-data](https://huggingface.co/datasets/OneThink/OneThinker-train-data)] [🤗 [OneThinker-eval](https://huggingface.co/datasets/OneThink/OneThinker-eval)]
 
