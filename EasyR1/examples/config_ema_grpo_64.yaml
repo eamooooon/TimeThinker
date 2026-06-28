@@ -84,7 +84,7 @@ worker:
 
   reward:
     reward_type: batch
-    reward_function: EasyR1/verl/reward_function/onethinker_reward.py:compute_score
+    reward_function: EasyR1/verl/reward_function/timethinker_reward.py:compute_score
 
 trainer:
   total_epochs: 1

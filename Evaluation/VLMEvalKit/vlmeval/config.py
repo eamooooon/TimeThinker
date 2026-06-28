@@ -1098,9 +1098,9 @@ qwen3vl_series = {
         ),
         post_process=True
     ),
-    "Qwen3-VL-8B-Instruct-OneThinker": partial(
+    "Qwen3-VL-4B-Instruct": partial(
         Qwen3VLChat,
-        model_path="OneThinker/OneThinker-8B",
+        model_path="Qwen/Qwen3-VL-4B-Instruct",
         use_custom_prompt=False,
         use_vllm=True,
         do_sample=False, 
@@ -1113,14 +1113,6 @@ qwen3vl_series = {
             "<think>\nyour_thinking_process\n</think>\n\n<answer>\nyour_answer_here\n</answer>\n\n"
         ),
         post_process=True
-    ),
-    "Qwen3-VL-4B-Instruct": partial(
-        Qwen3VLChat,
-        model_path="Qwen/Qwen3-VL-4B-Instruct",
-        use_custom_prompt=False,
-        use_vllm=True,
-        temperature=0.7, 
-        max_new_tokens=16384
     ),
     
 }

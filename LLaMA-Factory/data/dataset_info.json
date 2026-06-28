@@ -1,6 +1,6 @@
 {
-  "onethinker_sft_image": {
-    "file_name": "onethinker_sft_image.json",
+  "timethinker_sft_image": {
+    "file_name": "timethinker_sft_image.json",
     "formatting": "sharegpt",
     "columns": {
       "messages": "messages",
@@ -13,8 +13,8 @@
       "assistant_tag": "assistant"
     }
   },
-  "onethinker_sft_video": {
-    "file_name": "onethinker_sft_video.json",
+  "timethinker_sft_video": {
+    "file_name": "timethinker_sft_video.json",
     "formatting": "sharegpt",
     "columns": {
       "messages": "messages",

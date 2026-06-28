@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 model_paths=(
-"model/OneThinker-8B" 
+"models/TimeThinker-4B"
 )
 
 datasets=(

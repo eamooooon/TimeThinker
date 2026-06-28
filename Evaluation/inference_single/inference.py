@@ -13,7 +13,7 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 # ================== MANUAL CONFIGURATION ==================
 # Model checkpoint
-CHECKPOINT_PATH = "OneThink/OneThinker-8B"
+CHECKPOINT_PATH = "models/TimeThinker-4B"
 
 # Media path (image or video)
 MEDIA_PATH = ""
