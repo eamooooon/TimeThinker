@@ -1,5 +1,10 @@
 # env
-.venv*/
+.venv_*/
+
+# python cache
+__pycache__/
+*.py[cod]
+*$py.class
 
 # data & models
 data/
