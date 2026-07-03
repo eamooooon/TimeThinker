@@ -18,7 +18,7 @@ Expected TimeThinker training files after conversion:
 
 - `LLaMA-Factory/data/timethinker_sft_image.json`
 - `LLaMA-Factory/data/timethinker_sft_video.json`
-- `timethinker_rl_train.json`
+- `EasyR1/data/timethinker_rl_train.json`
 
 ## Setup
 
@@ -43,20 +43,20 @@ Run SFT:
 
 ```bash
 source .venv-llamafactory/bin/activate
-bash ./LLaMA-Factory/local_scripts/run_timethinker_sft.sh
+bash ./scripts/train/run_sft.sh
 ```
 
 Run RL:
 
 ```bash
 source .venv-easyr1/bin/activate
-bash ./EasyR1/local_scripts/run_timethinker_rl.sh
+bash ./scripts/train/run_rl.sh
 ```
 
 ## Evaluation
 
 ```bash
-bash ./Evaluation/Eval/eval_bench_all.sh
+bash ./scripts/eval/run_bench.sh
 ```
 
 For a single example:

@@ -139,7 +139,6 @@ def _load_single_dataset(
             cache_dir=model_args.cache_dir,
             token=model_args.hf_hub_token,
             num_proc=data_args.preprocessing_num_workers,
-            trust_remote_code=model_args.trust_remote_code,
             streaming=data_args.streaming and dataset_attr.load_from != "file",
         )
         if data_args.streaming and dataset_attr.load_from == "file":
@@ -272,10 +271,25 @@ def _get_preprocessed_dataset(
         from datetime import datetime
         import json
 
+        feature_keys = ("input_ids", "attention_mask", "labels", "images", "videos", "audios")
+        empty_defaults = {key: [] for key in feature_keys}
+
+        def _normalize_batch(processed):
+            if not processed:
+                return {}
+
+            n = len(next(iter(processed.values()))) if processed else 0
+            return {key: processed.get(key, [empty_defaults.get(key)] * n) for key in feature_keys}
+
         def _wrap(batch):
+            try:
+                return _normalize_batch(fn(batch))
+            except Exception as batch_error:
+                pass
+
             kept = 0
             n = len(next(iter(batch.values()))) if batch else 0
-            out_batch = {}  # Accumulate the "successful samples" batch (each column is a list, length = kept)
+            out_batch = {key: [] for key in feature_keys}
 
             for i in range(n):
                 # Key: call a single sample in "batched" form too (each column is a list of length 1)
@@ -285,19 +299,24 @@ def _get_preprocessed_dataset(
                     if not processed:
                         continue
 
-                    # Normalization: unwrap returned "length-1 list" or scalar into a single value before accumulating
+                    # Normalize the length-1 batched return, then fill every declared feature column.
+                    single_out = {}
                     for k, v in processed.items():
                         if isinstance(v, list):
                             val = v[0] if len(v) > 0 else None
                         else:
                             val = v
-                        out_batch.setdefault(k, []).append(val)
+                        single_out[k] = val
+
+                    for key in feature_keys:
+                        out_batch[key].append(single_out.get(key, empty_defaults.get(key)))
 
                     kept += 1
                 except Exception as e:
                     rec = {
                         "time": datetime.now().isoformat(timespec="seconds"),
                         "error": str(e),
+                        "batch_error": str(batch_error),
                         "sample_index_in_batch": i,
                         "data": {k: batch[k][i] for k in batch},  # the original item
                     }
@@ -312,26 +331,19 @@ def _get_preprocessed_dataset(
         return _wrap
 
 
+    # Pass an explicit `features` schema to prevent PyArrow from inferring a
+    # column as `null` when an early writer batch happens to contain only None
+    # values (e.g. a batch of pure-image samples produces no `videos`, and a
+    # later batch with real video paths then fails to cast list<string> -> null).
+    # See https://github.com/tulerfeng/OneThinker/issues/10
     dataset = dataset.map(
         _safe_batch_wrapper(dataset_processor.preprocess_dataset),
         batched=True,
         batch_size=data_args.preprocessing_batch_size,
         remove_columns=column_names,
         features=features,
-        writer_batch_size=8,
         **kwargs,
     )
-
-    # change to the below code if meet error, refer to https://github.com/tulerfeng/OneThinker/issues/10
-    
-    # dataset = dataset.map(
-    #     dataset_processor.preprocess_dataset,
-    #     batched=True,
-    #     batch_size=data_args.preprocessing_batch_size,
-    #     remove_columns=column_names,
-    #     features=features,
-    #     **kwargs,
-    # )
 
 
 

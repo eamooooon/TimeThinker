@@ -13,10 +13,20 @@ from collections import defaultdict
 import torch
 from tqdm import tqdm
 from rouge_score import rouge_scorer
+import av
+try:
+    import cv2
+except Exception:
+    cv2 = None
 
 from transformers import AutoProcessor
 from vllm import LLM, SamplingParams
 from qwen_vl_utils import process_vision_info
+
+torch.set_num_threads(int(os.environ.get("EVAL_TORCH_NUM_THREADS", os.environ.get("OMP_NUM_THREADS", "8"))))
+torch.set_num_interop_threads(int(os.environ.get("EVAL_TORCH_INTEROP_THREADS", "1")))
+if cv2 is not None:
+    cv2.setNumThreads(int(os.environ.get("OPENCV_NUM_THREADS", "1")))
 
 # ====== Optional: math equivalence dependencies (automatically degrade if unavailable)======
 try:
@@ -38,6 +48,7 @@ DEFAULT_BSZ = 64
 DEFAULT_SEED = 0
 DEFAULT_MAX_TOKENS = 8192
 DEFAULT_TEMPERATURE = 0.0
+DEFAULT_TOP_P = 0.001
 DEFAULT_TOP_K = -1
 
 # Video/Image preprocessing parameters
@@ -72,6 +83,10 @@ TYPE_TEMPLATE = {
         "Example:\n<answer>Hello World</answer>"
     ),
     "open-ended": (
+        "Please provide only your text answer within the <answer>...</answer> tags.\n"
+        "Example:\n<answer>The capital of France is Paris.</answer>"
+    ),
+    "free-form": (
         "Please provide only your text answer within the <answer>...</answer> tags.\n"
         "Example:\n<answer>The capital of France is Paris.</answer>"
     ),
@@ -304,7 +319,7 @@ def accuracy_only(
         return (max(0.0, min(1.0, 1.0 - wer(gt, ans))), {})
 
     # open-ended (ROUGE)
-    if ptype_l == "open-ended":
+    if ptype_l in {"open-ended", "free-form"}:
         return (max(0.0, min(1.0, compute_rouge_score(gt, ans))), {})
 
     # math (symbolic equivalence)
@@ -428,7 +443,7 @@ def finalize_metrics(agg: Dict[str, Any]) -> Dict[str, Any]:
 # =========================
 def build_user_content_item(
     data_type: str,
-    full_path: str,
+    full_path: Any,
     add_image_path: Optional[str],
     max_pixels_video: int,
     max_frames: int,
@@ -442,7 +457,8 @@ def build_user_content_item(
             "video": full_path,
             "max_pixels": max_pixels_video,
             "max_frames": max_frames,
-            "fps": fps
+            "fps": fps,
+            "sample_fps": fps,
         })
     elif data_type == "image":
         content.append({
@@ -456,7 +472,8 @@ def build_user_content_item(
             "video": full_path,
             "max_pixels": max_pixels_video,
             "max_frames": max_frames,
-            "fps": fps
+            "fps": fps,
+            "sample_fps": fps,
         })
         if not add_image_path:
             raise ValueError("data_type=video-image requires additional_path (image path)")
@@ -466,6 +483,60 @@ def build_user_content_item(
             "max_pixels": max_pixels_image
         })
     return content
+
+
+def read_video_frames_pyav(
+    video_path: str,
+    max_frames: int,
+    fps: int,
+    video_start: Optional[float] = None,
+    video_end: Optional[float] = None,
+) -> List[Any]:
+    """Decode a video into PIL frames before qwen-vl-utils sees it.
+
+    Path-based video decoding in qwen-vl-utils depends on decord/torchvision.
+    In this eval environment decord fails on some MVBench files, then falls
+    back to torchvision.io.read_video, which no longer exists in torchvision
+    0.26. Passing a frame list uses qwen-vl-utils' stable image-list branch.
+    """
+    if video_path.startswith("file://"):
+        video_path = video_path[7:]
+
+    start_time = float(video_start or 0.0)
+    end_time = float(video_end) if video_end is not None else None
+    target_fps = max(float(fps or DEFAULT_FPS), 1e-6)
+    step = 1.0 / target_fps
+    max_frames = max(1, int(max_frames))
+
+    frames = []
+    container = av.open(video_path)
+    try:
+        stream = container.streams.video[0]
+        video_fps = float(stream.average_rate) if stream.average_rate else target_fps
+        next_time = start_time
+
+        for idx, frame in enumerate(container.decode(stream)):
+            frame_time = frame.time if frame.time is not None else idx / max(video_fps, 1e-6)
+            if frame_time < start_time:
+                continue
+            if end_time is not None and frame_time > end_time:
+                break
+            if frame_time + 1e-6 < next_time:
+                continue
+
+            frames.append(frame.to_image().convert("RGB"))
+            next_time += step
+            if len(frames) >= max_frames:
+                break
+    finally:
+        container.close()
+
+    if not frames:
+        raise ValueError(f"No frames decoded from {video_path}")
+    if len(frames) == 1:
+        frames.append(frames[0].copy())
+    return frames
+
 
 def prepare_inputs_for_vllm_single(messages, processor):
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -500,16 +571,24 @@ def main():
 
     parser.add_argument("--base_prefix", type=str, default=DEFAULT_BASE_PREFIX)
     parser.add_argument("--batch_size", type=int, default=DEFAULT_BSZ)
+    parser.add_argument("--max_samples", type=int, default=-1, help="Run only the first N samples when > 0.")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
 
     parser.add_argument("--max_tokens", type=int, default=DEFAULT_MAX_TOKENS)
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
+    parser.add_argument("--top_p", type=float, default=DEFAULT_TOP_P)
     parser.add_argument("--top_k", type=int, default=DEFAULT_TOP_K)
 
     parser.add_argument("--max_pixels_video", type=int, default=DEFAULT_MAX_PIXELS_VIDEO)
     parser.add_argument("--max_frames", type=int, default=DEFAULT_MAX_FRAMES)
     parser.add_argument("--fps", type=int, default=DEFAULT_FPS)
     parser.add_argument("--max_pixels_image", type=int, default=DEFAULT_MAX_PIXELS_IMAGE)
+    parser.add_argument(
+        "--video_reader",
+        choices=["auto", "pyav", "qwen"],
+        default=os.environ.get("EVAL_VIDEO_READER", "auto"),
+        help="auto tries qwen-vl-utils/decord first and falls back to pyav for videos that fail.",
+    )
     args = parser.parse_args()
 
     in_base = Path(args.input_json).stem
@@ -526,6 +605,10 @@ def main():
     else:
         with open(args.input_json, "r", encoding="utf-8") as f:
             data = json.load(f)
+
+    if args.max_samples > 0:
+        data = data[: args.max_samples]
+        print(f"[Smoke] Running first {len(data)} samples from {args.input_json}.")
 
     # Resume from checkpoint
     final_output: List[Dict[str, Any]] = []
@@ -563,6 +646,7 @@ def main():
     )
     sampling_params = SamplingParams(
         temperature=args.temperature,
+        top_p=args.top_p,
         max_tokens=args.max_tokens,
         top_k=args.top_k,
         stop_token_ids=[],
@@ -589,6 +673,38 @@ def main():
         tail = TYPE_TEMPLATE.get(type_key, "")
         return QUESTION_TEMPLATE.format(Question=question) + tail
 
+    def prepare_example_input(example: Dict[str, Any], use_pyav: bool = False) -> Dict[str, Any]:
+        raw_path = example.get("path") or ""
+        full_path = os.path.join(args.base_prefix, raw_path.lstrip("./").lstrip("/"))
+        data_type = (example.get("data_type") or "").strip().lower()
+
+        add_path = None
+        if data_type == "video-image":
+            add_raw = example.get("additional_path") or ""
+            add_path = os.path.join(args.base_prefix, add_raw.lstrip("./").lstrip("/"))
+
+        video_payload = full_path
+        if use_pyav and data_type in {"video", "video-image"}:
+            video_payload = read_video_frames_pyav(
+                full_path,
+                max_frames=args.max_frames,
+                fps=args.fps,
+                video_start=example.get("video_start", example.get("start")),
+                video_end=example.get("video_end", example.get("end")),
+            )
+
+        content = build_user_content_item(
+            data_type=data_type,
+            full_path=video_payload,
+            add_image_path=add_path,
+            max_pixels_video=args.max_pixels_video,
+            max_frames=args.max_frames,
+            fps=args.fps,
+            max_pixels_image=args.max_pixels_image
+        )
+        content.append({"type": "text", "text": build_prompt_text(example)})
+        return prepare_inputs_for_vllm_single([{"role": "user", "content": content}], processor)
+
     # Main loop
     BSZ = args.batch_size
     for i in tqdm(range(start_idx, len(data), BSZ), desc="Batches"):
@@ -596,32 +712,20 @@ def main():
 
         inputs_for_vllm = []
         for example in batch:
-            # Prefix path with base directory
-            raw_path = example.get("path") or ""
-            full_path = os.path.join(args.base_prefix, raw_path.lstrip("./").lstrip("/"))
-            add_path = None
-            if (example.get("data_type") or "").strip().lower() == "video-image":
-                add_raw = example.get("additional_path") or ""
-                add_path = os.path.join(args.base_prefix, add_raw.lstrip("./").lstrip("/"))
-
-            # content
-            content = build_user_content_item(
-                data_type=(example.get("data_type") or "").strip().lower(),
-                full_path=full_path,
-                add_image_path=add_path,
-                max_pixels_video=args.max_pixels_video,
-                max_frames=args.max_frames,
-                fps=args.fps,
-                max_pixels_image=args.max_pixels_image
-            )
-            content.append({"type": "text", "text": build_prompt_text(example)})
-
-            messages = [{"role": "user", "content": content}]
-            inputs_for_vllm.append(prepare_inputs_for_vllm_single([messages[0]], processor))
+            if args.video_reader == "pyav":
+                inputs_for_vllm.append(prepare_example_input(example, use_pyav=True))
+            elif args.video_reader == "qwen":
+                inputs_for_vllm.append(prepare_example_input(example, use_pyav=False))
+            else:
+                try:
+                    inputs_for_vllm.append(prepare_example_input(example, use_pyav=False))
+                except Exception as e:
+                    print(f"[Warn] qwen video reader failed, fallback to pyav: {e}")
+                    inputs_for_vllm.append(prepare_example_input(example, use_pyav=True))
 
         # Generation
         try:
-            outputs = llm.generate(inputs_for_vllm, sampling_params=sampling_params)
+            outputs = llm.generate(inputs_for_vllm, sampling_params=sampling_params, use_tqdm=False)
             texts = [o.outputs[0].text for o in outputs]
         except Exception as e:
             print(f"[Error] vLLM generate failed at batch start_idx={i}: {e}")

@@ -1,7 +1,13 @@
 # env
-.venv-*/
+.venv*/
 
 # data & models
 data/
 Qwen/
 models/
+Evaluation/data/
+Evaluation/results/
+
+# logs
+swanlog/
+logs/

@@ -34,7 +34,7 @@
 
 TimeThinker README 期望的是：
 
-- `timethinker_rl_train.json`
+- `EasyR1/data/timethinker_rl_train.json`
 - `timethinker_sft_image.json`
 - `timethinker_sft_video.json`
 - 以及 `_unsampled` 版本
@@ -201,7 +201,7 @@ SFT 文件比 RL 文件多一个 `process` 字段：
 
 - TimeThinker 的 SFT 和 RL 脚本已经围绕固定数据接口写好。
 - `LLaMA-Factory` 期望 `timethinker_sft_image` 和 `timethinker_sft_video` 两个注册数据集。
-- `EasyR1/local_scripts/run_timethinker_rl.sh` 期望 `timethinker_rl_train.json`。
+- `scripts/train/run_rl.sh` 期望 `EasyR1/data/timethinker_rl_train.json`。
 - reward function 已经支持 Video-R1 当前的 `problem_type`。
 - 改数据是一次性适配；改训练脚本容易把路径、字段、reward、prompt builder 的兼容问题扩散到多个地方。
 
@@ -209,7 +209,7 @@ SFT 文件比 RL 文件多一个 `process` 字段：
 
 - `LLaMA-Factory/data/timethinker_sft_image.json`
 - `LLaMA-Factory/data/timethinker_sft_video.json`
-- `timethinker_rl_train.json` 或放到约定的数据路径下并修改最小量路径变量。
+- `EasyR1/data/timethinker_rl_train.json`
 
 转换时应保留：
 
@@ -294,7 +294,7 @@ RL 阶段需要大量可判分输出。Instruct + SFT cold start 的路线可以
 建议按以下顺序推进：
 
 1. 写数据转换脚本，把 Video-R1 SFT 数据拆成 image / video 两个 LLaMA-Factory sharegpt 风格文件。
-2. 写 RL 数据适配脚本，生成 EasyR1 能直接读取的 `timethinker_rl_train.json`。
+2. 写 RL 数据适配脚本，生成 EasyR1 能直接读取的 `EasyR1/data/timethinker_rl_train.json`。
 3. 解压媒体 zip，或者实现路径映射，确保 `path` 字段能被 image/video loader 读取。
 4. 先抽样 100 条 image + 100 条 video 跑 SFT preprocessing。
 5. 再抽样小规模 RL smoke test，确认 reward 正常返回非零分。
