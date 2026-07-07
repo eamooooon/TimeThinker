@@ -8,6 +8,7 @@ __pycache__/
 
 # data & models
 data/
+dataset/
 Qwen/
 models/
 Evaluation/data/

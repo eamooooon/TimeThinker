@@ -6,6 +6,10 @@ import re
 import json
 import math
 import argparse
+import random
+import hashlib
+import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
@@ -15,9 +19,18 @@ from tqdm import tqdm
 from rouge_score import rouge_scorer
 import av
 try:
+    av.logging.set_level(av.logging.PANIC)
+except Exception:
+    pass
+from PIL import Image
+try:
     import cv2
 except Exception:
     cv2 = None
+try:
+    from decord import VideoReader, cpu
+except Exception:
+    VideoReader = cpu = None
 
 from transformers import AutoProcessor
 from vllm import LLM, SamplingParams
@@ -56,94 +69,56 @@ DEFAULT_MAX_PIXELS_VIDEO = 256 * 32 * 32
 DEFAULT_MAX_FRAMES = 128
 DEFAULT_FPS = 2
 DEFAULT_MAX_PIXELS_IMAGE = 1024 * 32 * 32
+FRAME_CACHE_VERSION = 1
+FRAME_CACHE_IMAGE_EXT = "jpg"
+FRAME_CACHE_JPEG_QUALITY = 95
 
 # =========================
 # PROMPT (keep exactly as provided)
 # =========================
 QUESTION_TEMPLATE = (
     "{Question}\n"
-    "Please answer this question based on the visual content."
-    "Provide your thinking process between the <think> and </think> tags, and then give your final answer between the <answer> and </answer> tags."
-    "At the end, you must output the final answer in the format:\n"
-    "<answer><your_answer_here></answer>\n"
+    "Please answer this question based on the visual content.\n"
+    "Your entire response must follow exactly this structure:\n"
+    "<think>\n"
+    "Your reasoning here.\n"
+    "</think>\n"
+    "<answer>\n"
+    "Your final answer here.\n"
+    "</answer>\n"
+    "Do not write anything before <think> or after </answer>.\n"
 )
 
 TYPE_TEMPLATE = {
     "multiple choice": (
-        "Please provide only the single option letter (e.g., A, B, C, D, etc.) "
-        "within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>A</answer>"
+        "The final answer inside <answer> must be only the single option letter "
+        "(e.g., A, B, C, D, etc.).\n"
+        "Example:\n<think>The correct option is A.</think>\n<answer>A</answer>"
     ),
     "numerical": (
-        "Please provide only the numerical value within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>3.14</answer>"
+        "The final answer inside <answer> must be only the numerical value.\n"
+        "Example:\n<think>Compute the requested value.</think>\n<answer>3.14</answer>"
     ),
     "OCR": (
-        "Please provide only the transcribed text within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>Hello World</answer>"
+        "The final answer inside <answer> must be only the transcribed text.\n"
+        "Example:\n<think>Read the visible text.</think>\n<answer>Hello World</answer>"
     ),
     "open-ended": (
-        "Please provide only your text answer within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>The capital of France is Paris.</answer>"
+        "The final answer inside <answer> must be only your concise text answer.\n"
+        "Example:\n<think>Identify the requested fact.</think>\n<answer>The capital of France is Paris.</answer>"
     ),
     "free-form": (
-        "Please provide only your text answer within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>The capital of France is Paris.</answer>"
+        "The final answer inside <answer> must be only your concise text answer.\n"
+        "Example:\n<think>Identify the requested fact.</think>\n<answer>The capital of France is Paris.</answer>"
     ),
     "regression": (
-        "Please provide only the numerical value within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>42.7</answer>"
+        "The final answer inside <answer> must be only the numerical value.\n"
+        "Example:\n<think>Estimate the target value.</think>\n<answer>42.7</answer>"
     ),
     "math": (
-        "Please provide only the final result (a number or LaTeX formula) within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>$$-\\dfrac{3}{2}$$</answer>"
-    ),
-    "temporal grounding": (
-        "Please provide only the time span in seconds as JSON within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>{\"time\": [12.3, 25.7]}</answer>"
-    ),
-    "spatial grounding": (
-        "Please provide only the bounding box as JSON with key 'boxes' within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>{\"boxes\": [35, 227, 437, 932]}</answer>"
-    ),
-    "spatial-temporal grounding": (
-        "Please provide only the time span in seconds and bounding boxes as JSON within the <answer>...</answer> tags.\n"
-        "You MUST output one bounding box for every integer second within the given time span (inclusive).\n"
-        "Example:\n"
-        "<answer>{\"time\": [8.125, 13.483], \"boxes\": {\"9\": [317, 422, 582, 997], "
-        "\"10\": [332, 175, 442, 369], \"11\": [340, 180, 450, 370]}}</answer>\n"
-        "Note: Each key in 'boxes' must be an integer second within the span, and its value must be a 4-number bounding box [x1, y1, x2, y2]."
-    ),
-    "tracking": (
-        "Please track the target object throughout the video and provide one bounding box per second, "
-        "ONLY up to 32 seconds, within the <answer>...</answer> tags.\n"
-        "Example:\n"
-        "<answer>{\"boxes\": {\"1\": [405, 230, 654, 463], \"2\": [435, 223, 678, 446], ..., "
-        "\"32\": [415, 203, 691, 487]}}</answer>\n"
-        "Note: Each key in 'boxes' must correspond to a second (1, 2, 3, ..., 32) and contain a 4-number bounding box [x1, y1, x2, y2]."
-    ),
-    "segmentation_image": (
-        "This task prepares inputs for image object segmentation with a specialized model (e.g., SAM2).\n"
-        "Please provide ONE bounding box, 3 positive points (clearly INSIDE the object), and 3 negative points "
-        "(clearly OUTSIDE the object) within the <answer>...</answer> tags.\n"
-        "Choose informative points that help distinguish object vs. background. Prefer negatives on clear non-object "
-        "pixels INSIDE the box when safe; otherwise place them just outside on obvious background. "
-        "Negatives must NEVER be on the object or on its boundary.\n"
-        "Example:\n"
-        "<answer>{\"boxes\": [x1, y1, x2, y2], \"positive_points\": [[x,y],[x,y],[x,y]], "
-        "\"negative_points\": [[x,y],[x,y],[x,y]]}</answer>"
-    ),
-    "segmentation_video": (
-        "This task prepares inputs for video object segmentation with a specialized model (e.g., SAM2).\n"
-        "Please select ONE representative time (in seconds), and provide ONE bounding box, "
-        "3 positive points (clearly INSIDE the object), and 3 negative points (clearly OUTSIDE the object) "
-        "within the <answer>...</answer> tags.\n"
-        "Choose informative points that help distinguish object vs. background. Prefer negatives on clear non-object "
-        "pixels INSIDE the box when safe; otherwise place them just outside on obvious background. "
-        "Negatives must NEVER be on the object or on its boundary.\n"
-        "Example:\n"
-        "<answer>{\"time\": <time_in_seconds>, \"boxes\": [x1, y1, x2, y2], "
-        "\"positive_points\": [[x,y],[x,y],[x,y]], \"negative_points\": [[x,y],[x,y],[x,y]]}</answer>"
+        "The final answer inside <answer> must be only the final result "
+        "(a number or LaTeX formula).\n"
+        "Example:\n<think>Solve the expression.</think>\n<answer>$$-\\dfrac{3}{2}$$</answer>"
     )
 }
 
@@ -152,11 +127,25 @@ TYPE_TEMPLATE = {
 # =========================
 ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL)
 
+STRICT_THINK_ANSWER_RE = re.compile(
+    r"\A\s*<think>.*?</think>\s*<answer>.*?</answer>\s*\Z",
+    re.DOTALL,
+)
+
 def extract_answer(text: str) -> str:
     if not isinstance(text, str):
         return ""
     m = ANSWER_RE.search(text)
     return m.group(1).strip() if m else text.strip()
+
+def has_answer_tag(text: str) -> bool:
+    return bool(isinstance(text, str) and ANSWER_RE.search(text))
+
+def has_think_tag(text: str) -> bool:
+    return bool(isinstance(text, str) and "<think>" in text and "</think>" in text)
+
+def has_strict_think_answer(text: str) -> bool:
+    return bool(isinstance(text, str) and STRICT_THINK_ANSWER_RE.fullmatch(text))
 
 def normalize_number(num_str: str) -> Optional[float]:
     try:
@@ -380,13 +369,80 @@ def accuracy_only(
 
 # =============== Component-level R@t statistics ===============
 RECALL_THRESHOLDS = [0.3, 0.5, 0.7]
+BOOTSTRAP_SAMPLES = int(os.environ.get("EVAL_BOOTSTRAP_SAMPLES", "1000"))
+BOOTSTRAP_SEED = int(os.environ.get("EVAL_BOOTSTRAP_SEED", "0"))
+
+def sanitize_metric_key(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "unknown"
+    text = re.sub(r"\s+", "_", text)
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", text)
+
+def category_for_example(example: Dict[str, Any]) -> str:
+    # Keep categories broad enough to be useful; data_source/path are too high-cardinality.
+    for key in ("dim", "task_type", "original_question_type", "sub_category", "domain"):
+        value = example.get(key)
+        if value is not None and str(value).strip() and str(value).strip().lower() != "none":
+            return str(value).strip()
+    return ""
+
+def valid_answer_for_problem(pred_ans: str, example: Dict[str, Any]) -> bool:
+    ptype = (example.get("problem_type") or "").strip().lower()
+    ans = (pred_ans or "").strip()
+
+    if ptype == "multiple choice":
+        options = example.get("options")
+        if isinstance(options, list) and options:
+            valid_letters = {chr(ord("A") + i) for i in range(len(options))}
+        else:
+            valid_letters = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        return len(ans) == 1 and ans.upper() in valid_letters
+
+    if ptype in {"numerical", "regression"}:
+        return normalize_number(ans) is not None
+
+    if ptype in {"ocr", "open-ended", "free-form", "math"}:
+        return bool(ans)
+
+    return bool(ans)
+
+def bootstrap_ci(values: List[float], samples: int = BOOTSTRAP_SAMPLES, seed: int = BOOTSTRAP_SEED) -> Tuple[float, float]:
+    if not values:
+        return (0.0, 0.0)
+    if len(values) == 1 or samples <= 0:
+        mean_value = sum(values) / len(values)
+        return (float(mean_value), float(mean_value))
+
+    rng = random.Random(seed)
+    n = len(values)
+    means = []
+    for _ in range(samples):
+        total = 0.0
+        for _ in range(n):
+            total += values[rng.randrange(n)]
+        means.append(total / n)
+    means.sort()
+    low_idx = int(0.025 * (samples - 1))
+    high_idx = int(0.975 * (samples - 1))
+    return (float(means[low_idx]), float(means[high_idx]))
 
 def init_aggregator() -> Dict[str, Any]:
     return {
         "overall_acc_sum": 0.0,
         "overall_count": 0,
+        "acc_values": [],
         "per_type_acc_sum": defaultdict(float),
         "per_type_count": defaultdict(int),
+        "category_acc_sum": defaultdict(float),
+        "category_count": defaultdict(int),
+        "answer_extract_count": 0,
+        "invalid_answer_count": 0,
+        "output_token_sum": 0,
+        "output_token_count": 0,
+        "truncated_count": 0,
+        "has_think_count": 0,
+        "strict_format_count": 0,
 
         # Component-level (by problem_type, then by component name)
         "comp_sum": defaultdict(lambda: defaultdict(float)),     # comp_sum[ptype][comp]
@@ -399,14 +455,40 @@ def accumulate_metrics(
     ptype: str,
     acc: float,
     comp: Dict[str, float],
+    answer_extracted: bool = False,
+    invalid_answer: bool = False,
+    output_tokens: Optional[int] = None,
+    truncated: bool = False,
+    category: str = "",
+    has_think: bool = False,
+    strict_format: bool = False,
 ):
     pkey = (ptype or "").strip()
 
     # overall + per_type accuracy
     agg["overall_acc_sum"] += float(acc)
     agg["overall_count"]   += 1
+    agg["acc_values"].append(float(acc))
     agg["per_type_acc_sum"][pkey] += float(acc)
     agg["per_type_count"][pkey]   += 1
+
+    if category:
+        agg["category_acc_sum"][category] += float(acc)
+        agg["category_count"][category] += 1
+
+    if answer_extracted:
+        agg["answer_extract_count"] += 1
+    if invalid_answer:
+        agg["invalid_answer_count"] += 1
+    if output_tokens is not None:
+        agg["output_token_sum"] += int(output_tokens)
+        agg["output_token_count"] += 1
+    if truncated:
+        agg["truncated_count"] += 1
+    if has_think:
+        agg["has_think_count"] += 1
+    if strict_format:
+        agg["strict_format_count"] += 1
 
     # components
     for cname, cval in comp.items():
@@ -417,15 +499,50 @@ def accumulate_metrics(
             if val >= t:
                 agg["comp_recall_hits"][pkey][cname][t] += 1
 
-def finalize_metrics(agg: Dict[str, Any]) -> Dict[str, Any]:
+def finalize_metrics(agg: Dict[str, Any], include_bootstrap: bool = False) -> Dict[str, Any]:
     out = {}
+    count = max(1, agg["overall_count"])
 
     # overall
-    out["overall/acc"] = agg["overall_acc_sum"] / max(1, agg["overall_count"])
+    out["overall/acc"] = agg["overall_acc_sum"] / count
+    out["answer/acc"] = out["overall/acc"]
+    out["answer/extract_rate"] = agg["answer_extract_count"] / count
+    out["answer/invalid_rate"] = agg["invalid_answer_count"] / count
+    out["output/avg_tokens"] = agg["output_token_sum"] / max(1, agg["output_token_count"])
+    out["output/truncation_rate"] = agg["truncated_count"] / count
+    out["format/has_think_rate"] = agg["has_think_count"] / count
+    out["format/strict_rate"] = agg["strict_format_count"] / count
+    out["answer_acc"] = out["answer/acc"]
+    out["answer_extract_rate"] = out["answer/extract_rate"]
+    out["invalid_answer_rate"] = out["answer/invalid_rate"]
+    out["avg_output_tokens"] = out["output/avg_tokens"]
+    out["truncation_rate"] = out["output/truncation_rate"]
+
+    if include_bootstrap:
+        low, high = bootstrap_ci(agg["acc_values"])
+        out["answer/bootstrap_ci_low"] = low
+        out["answer/bootstrap_ci_high"] = high
+        out["bootstrap_ci"] = {"low": low, "high": high}
 
     # per_type accuracy
     for pkey, cnt in agg["per_type_count"].items():
         out[f"{pkey}/acc"] = agg["per_type_acc_sum"][pkey] / max(1, cnt)
+
+    if agg["category_count"]:
+        category_accs = []
+        per_category_acc = {}
+        per_category_count = {}
+        for category, cnt in sorted(agg["category_count"].items()):
+            acc = agg["category_acc_sum"][category] / max(1, cnt)
+            category_accs.append(acc)
+            per_category_acc[category] = acc
+            per_category_count[category] = cnt
+            slug = sanitize_metric_key(category)
+            out[f"category/{slug}/acc"] = acc
+            out[f"category/{slug}/count"] = cnt
+        out["per_category/macro_acc"] = sum(category_accs) / max(1, len(category_accs))
+        out["per_category_acc"] = per_category_acc
+        out["per_category_count"] = per_category_count
 
     # per_type component means + recalls
     for pkey, comp_sums in agg["comp_sum"].items():
@@ -538,6 +655,194 @@ def read_video_frames_pyav(
     return frames
 
 
+def read_video_frames_decord(
+    video_path: str,
+    max_frames: int,
+    fps: int,
+    video_start: Optional[float] = None,
+    video_end: Optional[float] = None,
+) -> List[Any]:
+    if VideoReader is None or cpu is None:
+        raise RuntimeError("decord is not available")
+
+    if video_path.startswith("file://"):
+        video_path = video_path[7:]
+
+    vr = VideoReader(video_path, ctx=cpu(0), num_threads=1)
+    total_frames = len(vr)
+    if total_frames <= 0:
+        raise ValueError(f"No frames decoded from {video_path}")
+
+    source_fps = float(vr.get_avg_fps() or fps or DEFAULT_FPS)
+    target_fps = max(float(fps or DEFAULT_FPS), 1e-6)
+    max_frames = max(1, int(max_frames))
+
+    start_frame = 0
+    if video_start is not None:
+        start_frame = max(0, int(float(video_start) * source_fps))
+
+    end_frame = total_frames - 1
+    if video_end is not None:
+        end_frame = min(total_frames - 1, int(float(video_end) * source_fps))
+
+    if end_frame < start_frame:
+        raise ValueError(f"Invalid video time range for {video_path}")
+
+    step = max(1, int(round(source_fps / target_fps)))
+    indices = list(range(start_frame, end_frame + 1, step))
+    if not indices:
+        indices = [start_frame]
+
+    if len(indices) > max_frames:
+        stride = len(indices) / max_frames
+        indices = [indices[min(int(i * stride), len(indices) - 1)] for i in range(max_frames)]
+
+    batch = vr.get_batch(indices).asnumpy()
+    frames = [Image.fromarray(frame).convert("RGB") for frame in batch]
+    if not frames:
+        raise ValueError(f"No frames decoded from {video_path}")
+    if len(frames) == 1:
+        frames.append(frames[0].copy())
+    return frames
+
+
+def _clean_video_path(video_path: str) -> str:
+    if video_path.startswith("file://"):
+        video_path = video_path[7:]
+    return video_path
+
+
+def frame_cache_key(
+    video_path: str,
+    max_frames: int,
+    fps: int,
+    video_start: Optional[float] = None,
+    video_end: Optional[float] = None,
+) -> Tuple[str, Dict[str, Any]]:
+    clean_path = _clean_video_path(video_path)
+    abs_path = os.path.abspath(clean_path)
+    try:
+        stat = os.stat(clean_path)
+        source = {
+            "path": abs_path,
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+    except Exception:
+        source = {
+            "path": abs_path,
+            "size": None,
+            "mtime_ns": None,
+        }
+
+    key_data = {
+        "version": FRAME_CACHE_VERSION,
+        "source": source,
+        "max_frames": int(max_frames),
+        "fps": float(fps),
+        "video_start": None if video_start is None else float(video_start),
+        "video_end": None if video_end is None else float(video_end),
+        "image_ext": FRAME_CACHE_IMAGE_EXT,
+        "jpeg_quality": FRAME_CACHE_JPEG_QUALITY,
+    }
+    digest = hashlib.sha256(json.dumps(key_data, sort_keys=True).encode("utf-8")).hexdigest()
+    return digest, key_data
+
+
+def frame_cache_dir_for(cache_root: Path, key: str) -> Path:
+    return cache_root / key[:2] / key
+
+
+def load_frame_cache(cache_root: Optional[Path], key: str) -> Optional[List[Any]]:
+    if cache_root is None:
+        return None
+
+    cache_dir = frame_cache_dir_for(cache_root, key)
+    meta_path = cache_dir / "metadata.json"
+    if not meta_path.exists():
+        return None
+
+    try:
+        with meta_path.open("r", encoding="utf-8") as f:
+            meta = json.load(f)
+        frame_names = meta.get("frames", [])
+        if not isinstance(frame_names, list) or not frame_names:
+            return None
+
+        frames = []
+        for name in frame_names:
+            frame_path = cache_dir / str(name)
+            if not frame_path.exists():
+                return None
+            with Image.open(frame_path) as image:
+                frames.append(image.convert("RGB").copy())
+        if len(frames) == 1:
+            frames.append(frames[0].copy())
+        return frames
+    except Exception:
+        return None
+
+
+def save_frame_cache(
+    cache_root: Optional[Path],
+    key: str,
+    key_data: Dict[str, Any],
+    frames: List[Any],
+) -> bool:
+    if cache_root is None or not frames:
+        return False
+
+    cache_dir = frame_cache_dir_for(cache_root, key)
+    meta_path = cache_dir / "metadata.json"
+    if meta_path.exists():
+        return False
+
+    parent = cache_dir.parent
+    tmp_dir = parent / f".{key}.{os.getpid()}.tmp"
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        tmp_dir.mkdir(parents=True)
+
+        frame_names = []
+        for idx, frame in enumerate(frames):
+            name = f"{idx:04d}.{FRAME_CACHE_IMAGE_EXT}"
+            frame_names.append(name)
+            frame.convert("RGB").save(
+                tmp_dir / name,
+                format="JPEG",
+                quality=FRAME_CACHE_JPEG_QUALITY,
+                optimize=False,
+            )
+
+        with (tmp_dir / "metadata.json").open("w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "key": key,
+                    "key_data": key_data,
+                    "frames": frame_names,
+                    "num_frames": len(frame_names),
+                },
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
+
+        if cache_dir.exists() and not meta_path.exists():
+            shutil.rmtree(cache_dir)
+        tmp_dir.rename(cache_dir)
+        return True
+    except FileExistsError:
+        return False
+    except Exception as exc:
+        print(f"[Warn] Failed to save frame cache {cache_dir}: {exc}")
+        return False
+    finally:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def prepare_inputs_for_vllm_single(messages, processor):
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     image_inputs, video_inputs, video_kwargs = process_vision_info(
@@ -561,6 +866,7 @@ def prepare_inputs_for_vllm_single(messages, processor):
 # Main pipeline
 # =========================
 def main():
+    eval_start_time = time.perf_counter()
     parser = argparse.ArgumentParser(description="Multimodal Evaluation (accuracy + component-wise recalls)")
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--input_json", type=str, required=True)
@@ -585,9 +891,21 @@ def main():
     parser.add_argument("--max_pixels_image", type=int, default=DEFAULT_MAX_PIXELS_IMAGE)
     parser.add_argument(
         "--video_reader",
-        choices=["auto", "pyav", "qwen"],
+        choices=["auto", "decord", "pyav", "qwen"],
         default=os.environ.get("EVAL_VIDEO_READER", "auto"),
-        help="auto tries qwen-vl-utils/decord first and falls back to pyav for videos that fail.",
+        help="auto decodes with decord first and falls back to pyav, skipping torchvision.",
+    )
+    parser.add_argument(
+        "--frame_cache_dir",
+        type=str,
+        default=os.environ.get("EVAL_FRAME_CACHE_DIR", ""),
+        help="Directory for runtime decoded-frame cache. Defaults to <base_prefix>/.cache/eval_frames.",
+    )
+    parser.add_argument(
+        "--disable_frame_cache",
+        action="store_true",
+        default=os.environ.get("EVAL_DISABLE_FRAME_CACHE", "0") == "1",
+        help="Disable runtime decoded-frame cache.",
     )
     args = parser.parse_args()
 
@@ -595,6 +913,16 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     output_json_path = out_dir / f"{in_base}{args.suffix}.json"
+
+    default_cache_base = Path(args.base_prefix) if args.base_prefix else Path(args.input_json).parent
+    frame_cache_root = None
+    if not args.disable_frame_cache:
+        frame_cache_root = Path(args.frame_cache_dir) if args.frame_cache_dir else default_cache_base / ".cache" / "eval_frames"
+        frame_cache_root.mkdir(parents=True, exist_ok=True)
+        print(f"[FrameCache] dir={frame_cache_root}")
+    else:
+        print("[FrameCache] disabled")
+    frame_cache_stats = defaultdict(int)
 
     # Read data
     if args.input_json.endswith(".jsonl"):
@@ -625,7 +953,29 @@ def main():
                 acc = float(sample.get("accuracy", 0.0))
                 ptype = sample.get("problem_type", "")
                 comps = sample.get("components", {}) if isinstance(sample.get("components"), dict) else {}
-                accumulate_metrics(agg, ptype, acc, comps)
+                out_text = sample.get("output", "")
+                pred_ans = sample.get("prediction")
+                if pred_ans is None:
+                    pred_ans = extract_answer(out_text)
+                output_tokens = sample.get("output_tokens")
+                if output_tokens is not None:
+                    try:
+                        output_tokens = int(output_tokens)
+                    except Exception:
+                        output_tokens = None
+                accumulate_metrics(
+                    agg,
+                    ptype,
+                    acc,
+                    comps,
+                    answer_extracted=bool(sample.get("answer_extracted", has_answer_tag(out_text))),
+                    invalid_answer=bool(sample.get("invalid_answer", not valid_answer_for_problem(pred_ans, sample))),
+                    output_tokens=output_tokens,
+                    truncated=bool(sample.get("truncated", False)),
+                    category=sample.get("category", category_for_example(sample)),
+                    has_think=bool(sample.get("has_think", has_think_tag(out_text))),
+                    strict_format=bool(sample.get("strict_format", has_strict_think_answer(out_text))),
+                )
             start_idx = len(final_output)
             print(f"[Resume] Found {start_idx} processed samples, resume from {start_idx}.")
         except Exception as e:
@@ -665,15 +1015,96 @@ def main():
             question = f"{question}\nOptions:\n{opts}"
 
         pt_lower = pt.strip().lower()
-        if pt_lower == "segmentation":
-            type_key = "segmentation_video" if data_type == "video" else "segmentation_image"
-        else:
-            type_key = pt if pt in TYPE_TEMPLATE else pt_lower
+        type_key = pt if pt in TYPE_TEMPLATE else pt_lower
 
         tail = TYPE_TEMPLATE.get(type_key, "")
         return QUESTION_TEMPLATE.format(Question=question) + tail
 
-    def prepare_example_input(example: Dict[str, Any], use_pyav: bool = False) -> Dict[str, Any]:
+    def frame_cache_meta() -> Dict[str, Any]:
+        return {
+            "enabled": frame_cache_root is not None,
+            "dir": str(frame_cache_root) if frame_cache_root is not None else None,
+            "hit": int(frame_cache_stats["hit"]),
+            "miss": int(frame_cache_stats["miss"]),
+            "write": int(frame_cache_stats["write"]),
+            "write_skip": int(frame_cache_stats["write_skip"]),
+            "fallback_to_pyav": int(frame_cache_stats["fallback_to_pyav"]),
+        }
+
+    def output_meta() -> Dict[str, Any]:
+        return {
+            "batch_size": BSZ,
+            "model_path": args.model_path,
+            "input_json": args.input_json,
+            "elapsed_seconds": time.perf_counter() - eval_start_time,
+            "frame_cache": frame_cache_meta(),
+        }
+
+    def read_video_frames_with_cache(
+        video_path: str,
+        video_reader: str,
+        video_start: Optional[float] = None,
+        video_end: Optional[float] = None,
+    ) -> List[Any]:
+        cache_key, key_data = frame_cache_key(
+            video_path,
+            max_frames=args.max_frames,
+            fps=args.fps,
+            video_start=video_start,
+            video_end=video_end,
+        )
+
+        cached_frames = load_frame_cache(frame_cache_root, cache_key)
+        if cached_frames is not None:
+            frame_cache_stats["hit"] += 1
+            return cached_frames
+
+        if frame_cache_root is not None:
+            frame_cache_stats["miss"] += 1
+
+        if video_reader == "decord":
+            frames = read_video_frames_decord(
+                video_path,
+                max_frames=args.max_frames,
+                fps=args.fps,
+                video_start=video_start,
+                video_end=video_end,
+            )
+        elif video_reader == "pyav":
+            frames = read_video_frames_pyav(
+                video_path,
+                max_frames=args.max_frames,
+                fps=args.fps,
+                video_start=video_start,
+                video_end=video_end,
+            )
+        else:
+            try:
+                frames = read_video_frames_decord(
+                    video_path,
+                    max_frames=args.max_frames,
+                    fps=args.fps,
+                    video_start=video_start,
+                    video_end=video_end,
+                )
+            except Exception as e:
+                frame_cache_stats["fallback_to_pyav"] += 1
+                print(f"[Warn] decord video reader failed, fallback to pyav: {e}")
+                frames = read_video_frames_pyav(
+                    video_path,
+                    max_frames=args.max_frames,
+                    fps=args.fps,
+                    video_start=video_start,
+                    video_end=video_end,
+                )
+
+        if save_frame_cache(frame_cache_root, cache_key, key_data, frames):
+            frame_cache_stats["write"] += 1
+        elif frame_cache_root is not None:
+            frame_cache_stats["write_skip"] += 1
+        return frames
+
+    def prepare_example_input(example: Dict[str, Any], video_reader: str = "qwen") -> Dict[str, Any]:
         raw_path = example.get("path") or ""
         full_path = os.path.join(args.base_prefix, raw_path.lstrip("./").lstrip("/"))
         data_type = (example.get("data_type") or "").strip().lower()
@@ -684,14 +1115,16 @@ def main():
             add_path = os.path.join(args.base_prefix, add_raw.lstrip("./").lstrip("/"))
 
         video_payload = full_path
-        if use_pyav and data_type in {"video", "video-image"}:
-            video_payload = read_video_frames_pyav(
-                full_path,
-                max_frames=args.max_frames,
-                fps=args.fps,
-                video_start=example.get("video_start", example.get("start")),
-                video_end=example.get("video_end", example.get("end")),
-            )
+        if data_type in {"video", "video-image"}:
+            video_start = example.get("video_start", example.get("start"))
+            video_end = example.get("video_end", example.get("end"))
+            if video_reader in {"auto", "decord", "pyav"}:
+                video_payload = read_video_frames_with_cache(
+                    full_path,
+                    video_reader=video_reader,
+                    video_start=video_start,
+                    video_end=video_end,
+                )
 
         content = build_user_content_item(
             data_type=data_type,
@@ -707,32 +1140,68 @@ def main():
 
     # Main loop
     BSZ = args.batch_size
-    for i in tqdm(range(start_idx, len(data), BSZ), desc="Batches"):
+    progress_desc = f"{in_base} batches"
+    for i in tqdm(range(start_idx, len(data), BSZ), desc=progress_desc):
         batch = data[i:i+BSZ]
 
         inputs_for_vllm = []
         for example in batch:
-            if args.video_reader == "pyav":
-                inputs_for_vllm.append(prepare_example_input(example, use_pyav=True))
-            elif args.video_reader == "qwen":
-                inputs_for_vllm.append(prepare_example_input(example, use_pyav=False))
-            else:
-                try:
-                    inputs_for_vllm.append(prepare_example_input(example, use_pyav=False))
-                except Exception as e:
-                    print(f"[Warn] qwen video reader failed, fallback to pyav: {e}")
-                    inputs_for_vllm.append(prepare_example_input(example, use_pyav=True))
+            inputs_for_vllm.append(prepare_example_input(example, video_reader=args.video_reader))
 
         # Generation
         try:
             outputs = llm.generate(inputs_for_vllm, sampling_params=sampling_params, use_tqdm=False)
-            texts = [o.outputs[0].text for o in outputs]
+            texts = []
+            completion_infos = []
+            for output in outputs:
+                completion = output.outputs[0] if getattr(output, "outputs", None) else None
+                if completion is None:
+                    texts.append("<answer>ERROR</answer>")
+                    completion_infos.append({
+                        "finish_reason": "missing_completion",
+                        "stop_reason": None,
+                        "output_tokens": 0,
+                        "truncated": False,
+                    })
+                    continue
+
+                text = completion.text
+                token_ids = getattr(completion, "token_ids", None)
+                output_tokens = len(token_ids) if token_ids is not None else None
+                finish_reason = getattr(completion, "finish_reason", None)
+                stop_reason = getattr(completion, "stop_reason", None)
+                finish_reason_l = str(finish_reason or "").lower()
+                truncated = (
+                    finish_reason_l == "length"
+                    or (
+                        output_tokens is not None
+                        and output_tokens >= args.max_tokens
+                        and finish_reason_l not in {"stop", "eos_token"}
+                    )
+                )
+
+                texts.append(text)
+                completion_infos.append({
+                    "finish_reason": finish_reason,
+                    "stop_reason": stop_reason,
+                    "output_tokens": output_tokens,
+                    "truncated": truncated,
+                })
         except Exception as e:
             print(f"[Error] vLLM generate failed at batch start_idx={i}: {e}")
             texts = ["<answer>ERROR</answer>"] * len(inputs_for_vllm)
+            completion_infos = [
+                {
+                    "finish_reason": "generation_error",
+                    "stop_reason": None,
+                    "output_tokens": 0,
+                    "truncated": False,
+                }
+                for _ in inputs_for_vllm
+            ]
 
         # Evaluation + accumulation + write results
-        for example, out_text in zip(batch, texts):
+        for example, out_text, completion_info in zip(batch, texts, completion_infos):
             pred_ans = extract_answer(out_text)
             gt_ans   = example.get("solution", "")
 
@@ -743,9 +1212,26 @@ def main():
                 problem_type=example.get("problem_type","")
             )
 
+            answer_extracted = has_answer_tag(out_text)
+            invalid_answer = not valid_answer_for_problem(pred_ans, example)
+            output_tokens = completion_info.get("output_tokens")
+            truncated = bool(completion_info.get("truncated", False))
+            has_think = has_think_tag(out_text)
+            strict_format = has_strict_think_answer(out_text)
+            category = category_for_example(example)
+
             sample_out = dict(example)
             sample_out["output"] = out_text
             sample_out["prediction"] = pred_ans
+            sample_out["answer_extracted"] = answer_extracted
+            sample_out["invalid_answer"] = invalid_answer
+            sample_out["output_tokens"] = output_tokens
+            sample_out["finish_reason"] = completion_info.get("finish_reason")
+            sample_out["stop_reason"] = completion_info.get("stop_reason")
+            sample_out["truncated"] = truncated
+            sample_out["has_think"] = has_think
+            sample_out["strict_format"] = strict_format
+            sample_out["category"] = category
             # —— New: for Segmentation, only extract <answer> content into predicted_answer_norm (no metric calculation)
             if (example.get("problem_type","").strip().lower() == "segmentation"):
                 sample_out["predicted_answer_norm"] = pred_ans
@@ -759,22 +1245,25 @@ def main():
                 agg,
                 example.get("problem_type",""),
                 float(acc),
-                components
+                components,
+                answer_extracted=answer_extracted,
+                invalid_answer=invalid_answer,
+                output_tokens=output_tokens,
+                truncated=truncated,
+                category=category,
+                has_think=has_think,
+                strict_format=strict_format,
             )
 
         # Write to disk per batch (including accumulated metrics)
-        metrics_dict = finalize_metrics(agg)
+        metrics_dict = finalize_metrics(agg, include_bootstrap=False)
         try:
             with open(output_json_path, "w", encoding="utf-8") as f:
                 json.dump(
                     {
                         "results": final_output,
                         "metrics": metrics_dict,
-                        "meta": {
-                            "batch_size": BSZ,
-                            "model_path": args.model_path,
-                            "input_json": args.input_json
-                        }
+                        "meta": output_meta()
                     },
                     f, indent=2, ensure_ascii=False
                 )
@@ -782,21 +1271,21 @@ def main():
             print(f"[Warn] Failed to write output json at batch end (i={i}): {e}")
 
     # Final write to disk
-    metrics_dict = finalize_metrics(agg)
+    metrics_dict = finalize_metrics(agg, include_bootstrap=True)
     with open(output_json_path, "w", encoding="utf-8") as f:
         json.dump(
             {
                 "results": final_output,
                 "metrics": metrics_dict,
-                "meta": {
-                    "batch_size": BSZ,
-                    "model_path": args.model_path,
-                    "input_json": args.input_json
-                }
+                "meta": output_meta()
             },
             f, indent=2, ensure_ascii=False
         )
     print(f"[Done] Saved {len(final_output)} samples to {output_json_path}")
+    print(f"[Time] elapsed_seconds: {time.perf_counter() - eval_start_time:.2f}")
+    print("[FrameCache]")
+    for k, v in frame_cache_meta().items():
+        print(f"  {k}: {v}")
     print("[Metrics]")
     for k, v in metrics_dict.items():
         try:

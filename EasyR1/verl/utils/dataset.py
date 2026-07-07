@@ -16,12 +16,14 @@
 
 import math
 import os
+import json
 from collections import defaultdict
 from io import BytesIO
 from typing import Any, Optional, Union
 
 import numpy as np
 import torch
+from datasets import Dataset as HFDataset
 from datasets import load_dataset
 from jinja2 import Template
 from PIL import Image
@@ -35,84 +37,43 @@ from . import torch_functional as VF
 
 QUESTION_TEMPLATE = (
     "{Question}\n"
-    "Please answer this question based on the visual content."
-    "Provide your thinking process between the <think> and </think> tags, and then give your final answer between the <answer> and </answer> tags."
-    "At the end, you must output the final answer in the format:\n"
-    "<answer><your_answer_here></answer>\n"
+    "Please answer this question based on the visual content.\n"
+    "Your entire response must follow exactly this structure:\n"
+    "<think>\n"
+    "Your reasoning here.\n"
+    "</think>\n"
+    "<answer>\n"
+    "Your final answer here.\n"
+    "</answer>\n"
+    "Do not write anything before <think> or after </answer>.\n"
 )
 
 TYPE_TEMPLATE = {
     "multiple choice": (
-        "Please provide only the single option letter (e.g., A, B, C, D, etc.) "
-        "within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>A</answer>"
+        "The final answer inside <answer> must be only the single option letter "
+        "(e.g., A, B, C, D, etc.).\n"
+        "Example:\n<think>The correct option is A.</think>\n<answer>A</answer>"
     ),
     "numerical": (
-        "Please provide only the numerical value within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>3.14</answer>"
+        "The final answer inside <answer> must be only the numerical value.\n"
+        "Example:\n<think>Compute the requested value.</think>\n<answer>3.14</answer>"
     ),
     "OCR": (
-        "Please provide only the transcribed text within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>Hello World</answer>"
+        "The final answer inside <answer> must be only the transcribed text.\n"
+        "Example:\n<think>Read the visible text.</think>\n<answer>Hello World</answer>"
     ),
     "open-ended": (
-        "Please provide only your text answer within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>The capital of France is Paris.</answer>"
+        "The final answer inside <answer> must be only your concise text answer.\n"
+        "Example:\n<think>Identify the requested fact.</think>\n<answer>The capital of France is Paris.</answer>"
     ),
     "regression": (
-        "Please provide only the numerical value within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>42.7</answer>"
+        "The final answer inside <answer> must be only the numerical value.\n"
+        "Example:\n<think>Estimate the target value.</think>\n<answer>42.7</answer>"
     ),
     "math": (
-        "Please provide only the final result (a number or LaTeX formula) within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>$$-\\dfrac{3}{2}$$</answer>"
-    ),
-    "temporal grounding": (
-        "Please provide only the time span in seconds as JSON within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>{\"time\": [12.3, 25.7]}</answer>"
-    ),
-    "spatial grounding": (
-        "Please provide only the bounding box as JSON with key 'boxes' within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>{\"boxes\": [35, 227, 437, 932]}</answer>"
-    ),
-    "spatial-temporal grounding": (
-        "Please provide only the time span in seconds and bounding boxes as JSON within the <answer>...</answer> tags.\n"
-        "You MUST output one bounding box for every integer second within the given time span (inclusive).\n"
-        "Example:\n"
-        "<answer>{\"time\": [8.125, 13.483], \"boxes\": {\"9\": [317, 422, 582, 997], "
-        "\"10\": [332, 175, 442, 369], \"11\": [340, 180, 450, 370]}}</answer>\n"
-        "Note: Each key in 'boxes' must be an integer second within the span, and its value must be a 4-number bounding box [x1, y1, x2, y2]."
-    ),
-    "tracking": (
-        "Please track the target object throughout the video and provide one bounding box per second, "
-        "ONLY up to 32 seconds, within the <answer>...</answer> tags.\n"
-        "Example:\n"
-        "<answer>{\"boxes\": {\"1\": [405, 230, 654, 463], \"2\": [435, 223, 678, 446], ..., "
-        "\"32\": [415, 203, 691, 487]}}</answer>\n"
-        "Note: Each key in 'boxes' must correspond to a second (1, 2, 3, ..., 32) and contain a 4-number bounding box [x1, y1, x2, y2]."
-    ),
-    "segmentation_image": (
-        "This task prepares inputs for image object segmentation with a specialized model (e.g., SAM2).\n"
-        "Please provide ONE bounding box, 3 positive points (clearly INSIDE the object), and 3 negative points "
-        "(clearly OUTSIDE the object) within the <answer>...</answer> tags.\n"
-        "Choose informative points that help distinguish object vs. background. Prefer negatives on clear non-object "
-        "pixels INSIDE the box when safe; otherwise place them just outside on obvious background. "
-        "Negatives must NEVER be on the object or on its boundary.\n"
-        "Example:\n"
-        "<answer>{\"boxes\": [x1, y1, x2, y2], \"positive_points\": [[x,y],[x,y],[x,y]], "
-        "\"negative_points\": [[x,y],[x,y],[x,y]]}</answer>"
-    ),
-    "segmentation_video": (
-        "This task prepares inputs for video object segmentation with a specialized model (e.g., SAM2).\n"
-        "Please select ONE representative time (in seconds), and provide ONE bounding box, "
-        "3 positive points (clearly INSIDE the object), and 3 negative points (clearly OUTSIDE the object) "
-        "within the <answer>...</answer> tags.\n"
-        "Choose informative points that help distinguish object vs. background. Prefer negatives on clear non-object "
-        "pixels INSIDE the box when safe; otherwise place them just outside on obvious background. "
-        "Negatives must NEVER be on the object or on its boundary.\n"
-        "Example:\n"
-        "<answer>{\"time\": <time_in_seconds>, \"boxes\": [x1, y1, x2, y2], "
-        "\"positive_points\": [[x,y],[x,y],[x,y]], \"negative_points\": [[x,y],[x,y],[x,y]]}</answer>"
+        "The final answer inside <answer> must be only the final result "
+        "(a number or LaTeX formula).\n"
+        "Example:\n<think>Solve the expression.</think>\n<answer>$$-\\dfrac{3}{2}$$</answer>"
     )
 }
 
@@ -165,11 +126,57 @@ def process_image(
     return image
 
 
+def _fetch_video_with_pyav(
+    vision_info: dict[str, Any], image_patch_size: int = 16, return_fps: bool = False
+):
+    import av
+    from qwen_vl_utils.vision_process import smart_nframes
+
+    video_path = vision_info["video"]
+    if isinstance(video_path, str) and video_path.startswith("file://"):
+        video_path = video_path[len("file://") :]
+
+    frames = []
+    with av.open(video_path) as container:
+        stream = container.streams.video[0]
+        raw_fps = float(stream.average_rate) if stream.average_rate else 24.0
+        for frame in container.decode(stream):
+            frames.append(frame.to_image().convert("RGB"))
+
+    if len(frames) == 0:
+        raise RuntimeError(f"No frames decoded from video: {video_path}")
+
+    nframes = smart_nframes(vision_info, total_frames=len(frames), video_fps=raw_fps)
+    indices = np.linspace(0, len(frames) - 1, nframes).round().astype(int).tolist()
+    sampled_frames = [frames[i] for i in indices]
+    sample_fps = nframes / max(len(frames), 1e-6) * raw_fps
+
+    fallback_info = dict(vision_info)
+    fallback_info["video"] = sampled_frames
+    fallback_info["sample_fps"] = sample_fps
+    fallback_info["raw_fps"] = raw_fps
+    return fetch_video(
+        fallback_info,
+        image_patch_size=image_patch_size,
+        return_video_sample_fps=return_fps,
+        return_video_metadata=return_fps,
+    )
+
+
 def process_video(
     video: str, min_pixels: int = 4*32*32, max_pixels: int = 64*32*32, max_frames: int = 128, video_fps: float = 2, return_fps: bool = False
 ):
     vision_info = {"video": video, "min_pixels": min_pixels, "max_pixels": max_pixels, "max_frames": max_frames, "fps": video_fps}
-    return fetch_video(vision_info, image_patch_size=16, return_video_sample_fps=return_fps, return_video_metadata=return_fps)
+    try:
+        return fetch_video(
+            vision_info,
+            image_patch_size=16,
+            return_video_sample_fps=return_fps,
+            return_video_metadata=return_fps,
+        )
+    except Exception as exc:
+        print(f"fetch_video failed for {video}, falling back to pyav: {exc}")
+        return _fetch_video_with_pyav(vision_info, image_patch_size=16, return_fps=return_fps)
 
 
 class RLHFDataset(Dataset):
@@ -219,8 +226,7 @@ class RLHFDataset(Dataset):
             file_type = os.path.splitext(os.listdir(data_path)[0])[-1][1:].replace("jsonl", "json")
             self.dataset = load_dataset(file_type, data_dir=data_path, split=data_split)
         elif os.path.isfile(data_path):
-            file_type = os.path.splitext(data_path)[-1][1:].replace("jsonl", "json")
-            self.dataset = load_dataset(file_type, data_files=data_path, split=data_split)
+            self.dataset = self._load_local_file(data_path)
         else:
             # load remote dataset from huggingface hub
             self.dataset = load_dataset(data_path, split=data_split)
@@ -237,6 +243,38 @@ class RLHFDataset(Dataset):
                 num_proc=filter_overlong_prompts_workers,
             )
 
+    @staticmethod
+    def _load_local_file(data_path: str) -> HFDataset:
+        ext = os.path.splitext(data_path)[-1].lower()
+        with open(data_path, encoding="utf-8") as f:
+            if ext == ".jsonl":
+                records = [json.loads(line) for line in f if line.strip()]
+            elif ext == ".json":
+                records = json.load(f)
+            else:
+                raise ValueError(f"Unsupported local dataset file extension: {ext}")
+
+        if isinstance(records, dict):
+            for key in ("train", "data", "instances"):
+                if isinstance(records.get(key), list):
+                    records = records[key]
+                    break
+
+        if not isinstance(records, list):
+            raise ValueError(f"Expected a list of records in local dataset file: {data_path}")
+
+        all_keys = set()
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError(f"Expected every record to be a dict in local dataset file: {data_path}")
+            all_keys.update(record.keys())
+
+        for record in records:
+            for key in all_keys:
+                record.setdefault(key, None)
+
+        return HFDataset.from_list(records)
+
 
     def _build_messages(self, example: dict[str, Any]) -> list[dict[str, Any]]:
         prompt_str: str = example[self.prompt_key]
@@ -244,7 +282,6 @@ class RLHFDataset(Dataset):
             format_prompt = Template(self.format_prompt.strip())
             prompt_str = format_prompt.render(content=prompt_str)
 
-        data_type = (example.get("data_type") or "").strip().lower()
         pt = example.get("problem_type") or ""
         question = prompt_str  
 
@@ -252,35 +289,54 @@ class RLHFDataset(Dataset):
             opts = "\n".join(example["options"])
             question = f"{question}\nOptions:\n{opts}"
 
-        if pt == "segmentation":
-            type_key = "segmentation_video" if data_type == "video" else "segmentation_image"
-        else:
-            type_key = pt
-
-        tail = TYPE_TEMPLATE.get(type_key, "")
+        tail = TYPE_TEMPLATE.get(pt, "")
         prompt_str = QUESTION_TEMPLATE.format(Question=question) + tail
 
         if self.image_key in example and isinstance(example.get(self.image_key), list) and len(example.get(self.image_key)) > 0:
             # https://huggingface.co/docs/transformers/en/tasks/image_text_to_text
             content_list = []
+            image_count = len(example.get(self.image_key))
+            if "<image>" not in prompt_str:
+                content_list.extend({"type": "image"} for _ in range(image_count))
+                content_list.append({"type": "text", "text": prompt_str})
+                return [{"role": "user", "content": content_list}]
+
+            inserted_images = 0
             for i, content in enumerate(prompt_str.split("<image>")):
-                if i != 0:
+                if i != 0 and inserted_images < image_count:
                     content_list.append({"type": "image"})
+                    inserted_images += 1
 
                 if content:
                     content_list.append({"type": "text", "text": content})
+
+            while inserted_images < image_count:
+                content_list.append({"type": "image"})
+                inserted_images += 1
 
             # print(content_list)
 
             return [{"role": "user", "content": content_list}]
         elif self.video_key in example and isinstance(example.get(self.video_key), list) and len(example.get(self.video_key)) > 0:
             content_list = []
+            video_count = len(example.get(self.video_key))
+            if "<video>" not in prompt_str:
+                content_list.extend({"type": "video"} for _ in range(video_count))
+                content_list.append({"type": "text", "text": prompt_str})
+                return [{"role": "user", "content": content_list}]
+
+            inserted_videos = 0
             for i, content in enumerate(prompt_str.split("<video>")):
-                if i != 0:
+                if i != 0 and inserted_videos < video_count:
                     content_list.append({"type": "video"})
+                    inserted_videos += 1
 
                 if content:
                     content_list.append({"type": "text", "text": content})
+
+            while inserted_videos < video_count:
+                content_list.append({"type": "video"})
+                inserted_videos += 1
 
             # print(content_list)
 
@@ -337,6 +393,8 @@ class RLHFDataset(Dataset):
     def __getitem__(self, index):
         example: dict = self.dataset[index]
         messages = self._build_messages(example)
+        example["problem_reserved_text"] = example.get(self.prompt_key, "")
+        example["multi_modal_data"] = None
         example.pop(self.prompt_key, None)
 
         if self.image_key in example and isinstance(example.get(self.image_key), list) and len(example.get(self.image_key)) > 0:

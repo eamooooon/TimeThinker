@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import inspect
 from contextlib import contextmanager
 from typing import Any, Optional, Union
 
@@ -22,6 +23,7 @@ import torch.distributed
 from tensordict import TensorDict
 from transformers import PreTrainedTokenizer, ProcessorMixin
 from vllm import LLM, RequestOutput, SamplingParams
+from vllm.engine.arg_utils import EngineArgs
 
 from ...protocol import DataProto
 from ...utils import torch_functional as VF
@@ -54,6 +56,28 @@ def _get_logit_bias(processor: Optional[ProcessorMixin]) -> Optional[dict[int, f
         return {image_token_id: -100}
     else:
         return None
+
+
+def _disable_mm_preprocessor_cache_kwargs() -> dict[str, Any]:
+    engine_args = inspect.signature(EngineArgs).parameters
+    if "disable_mm_preprocessor_cache" in engine_args:
+        return {"disable_mm_preprocessor_cache": True}
+    if "mm_processor_cache_gb" in engine_args:
+        return {"mm_processor_cache_gb": 0}
+    return {}
+
+
+def _sampling_params_update_key(sampling_params: SamplingParams, key: str) -> Optional[str]:
+    if key == "eos_token_id" and not _has_property_setter(type(sampling_params), key):
+        return "_eos_token_id" if hasattr(sampling_params, "_eos_token_id") else None
+    if hasattr(sampling_params, key):
+        return key
+    return None
+
+
+def _has_property_setter(cls: type, key: str) -> bool:
+    attr = getattr(cls, key, None)
+    return not isinstance(attr, property) or attr.fset is not None
 
 
 def _process_multi_modal_data(
@@ -125,7 +149,7 @@ class vLLMRollout(BaseRollout):
 
         engine_kwargs = {}
         if processor is not None:  # only VLMs have processor
-            engine_kwargs["disable_mm_preprocessor_cache"] = True
+            engine_kwargs.update(_disable_mm_preprocessor_cache_kwargs())
             if config.limit_images:
                 engine_kwargs["limit_mm_per_prompt"] = {"image": 1, "video": 1}
 
@@ -171,10 +195,11 @@ class vLLMRollout(BaseRollout):
         old_sampling_params_args = {}
         if kwargs:
             for key, value in kwargs.items():
-                if hasattr(self.sampling_params, key):
-                    old_value = getattr(self.sampling_params, key)
-                    old_sampling_params_args[key] = old_value
-                    setattr(self.sampling_params, key, value)
+                update_key = _sampling_params_update_key(self.sampling_params, key)
+                if update_key is not None:
+                    old_value = getattr(self.sampling_params, update_key)
+                    old_sampling_params_args[update_key] = old_value
+                    setattr(self.sampling_params, update_key, value)
 
         yield
         # roll back to previous sampling params
@@ -201,22 +226,23 @@ class vLLMRollout(BaseRollout):
         if batch_multi_modal_data is not None:
             vllm_inputs = []
             for raw_prompt_ids, multi_modal_data in zip(batch_raw_prompt_ids, batch_multi_modal_data):
-                mm_data, mm_kwargs = _process_multi_modal_data(
-                    multi_modal_data,
-                    prompts.meta_info["min_pixels"],
-                    prompts.meta_info["max_pixels"],
-                    prompts.meta_info["video_fps"],
-                )
                 item = {
                     "prompt_token_ids": list(raw_prompt_ids),
                 }
-                if mm_data is not None:
-                    item["multi_modal_data"] = mm_data
-                    # 关键：为 video 场景注入 mm_processor_kwargs（例如逐样本 fps）
-                    if mm_kwargs is not None:
-                        item["mm_processor_kwargs"] = mm_kwargs
-                        # tmp_mm.append(item["mm_processor_kwargs"])
-                    # print(item)
+                if multi_modal_data is not None:
+                    mm_data, mm_kwargs = _process_multi_modal_data(
+                        multi_modal_data,
+                        prompts.meta_info["min_pixels"],
+                        prompts.meta_info["max_pixels"],
+                        prompts.meta_info["video_fps"],
+                    )
+                    if mm_data is not None:
+                        item["multi_modal_data"] = mm_data
+                        # 关键：为 video 场景注入 mm_processor_kwargs（例如逐样本 fps）
+                        if mm_kwargs is not None:
+                            item["mm_processor_kwargs"] = mm_kwargs
+                            # tmp_mm.append(item["mm_processor_kwargs"])
+                        # print(item)
                 vllm_inputs.append(item)
 
         else:

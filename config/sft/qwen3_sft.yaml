@@ -23,16 +23,16 @@ dataset_dir: LLaMA-Factory/data
 media_dir: .
 use_fast_tokenizer: true
 cutoff_len: 16384
-overwrite_cache: true
+overwrite_cache: false
 preprocessing_num_workers: 16
 preprocessing_batch_size: 32
 max_samples: 10000
 tokenized_path: LLaMA-Factory/cache/timethinker_sft_10k
 
 ### output
-output_dir: models/TimeThinker-4B-SFT-v2-10000
+output_dir: models/TimeThinker-4B-SFT-v4-10000
 logging_steps: 1
-save_steps: 1000
+save_steps: 500
 save_only_model: false
 plot_loss: true
 overwrite_output_dir: true
@@ -42,7 +42,7 @@ save_total_limit: 5
 per_device_train_batch_size: 8
 gradient_accumulation_steps: 1
 dataloader_num_workers: 4
-learning_rate: 3.0e-6
+learning_rate: 1.0e-5
 weight_decay: 1.0e-6
 num_train_epochs: 1.0
 lr_scheduler_type: cosine
@@ -56,9 +56,9 @@ max_grad_norm: 5.0
 val_size: 0.1
 per_device_eval_batch_size: 4
 eval_strategy: steps
-eval_steps: 200
+eval_steps: 250
 
 report_to: none
 use_swanlab: true
 swanlab_project: TimeThinker
-swanlab_run_name: sft_4b-v2
+swanlab_run_name: sft_4b-v4-10k

@@ -38,6 +38,7 @@ from ..single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWo
 from ..single_controller.ray.base import create_colocated_worker_cls
 from ..utils import torch_functional as VF
 from ..utils.checkpoint import CHECKPOINT_TRACKER, find_latest_ckpt, remove_obsolete_ckpt
+from ..utils.dataset import process_video
 from ..utils.logger import Tracker
 from ..utils.py_functional import convert_dict_to_str, timer, unflatten_dict
 from ..utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -468,9 +469,167 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
+    def _get_video_indices(self, gen_batch: DataProto) -> list[int]:
+        multi_modal_data = gen_batch.non_tensor_batch.get("multi_modal_data")
+        if multi_modal_data is None:
+            return []
+
+        video_indices = []
+        for idx, mm_data in enumerate(multi_modal_data):
+            if isinstance(mm_data, dict) and len(mm_data.get("videos") or []) > 0:
+                video_indices.append(idx)
+
+        return video_indices
+
+    @staticmethod
+    def _video_tensor_to_pil_frames(video_tensor: torch.Tensor) -> list[Any]:
+        from PIL import Image
+
+        frames = []
+        video_tensor = video_tensor.detach().cpu()
+        for frame in video_tensor:
+            if frame.ndim == 3 and frame.shape[0] in (1, 3):
+                frame = frame.permute(1, 2, 0)
+            frame_array = frame.numpy()
+            frame_array = np.clip(frame_array, 0, 255).astype(np.uint8)
+            if frame_array.ndim == 2:
+                frame_array = np.stack([frame_array] * 3, axis=-1)
+            if frame_array.shape[-1] == 1:
+                frame_array = np.repeat(frame_array, 3, axis=-1)
+            frames.append(Image.fromarray(frame_array))
+
+        return frames
+
+    def _sample_video_frames_for_shuffle(self, video: Any) -> list[Any]:
+        if isinstance(video, (list, tuple)):
+            return list(video)
+
+        processed_video, _ = process_video(video, return_fps=True)
+        if isinstance(processed_video, tuple):
+            processed_video = processed_video[0]
+
+        if isinstance(processed_video, torch.Tensor):
+            return self._video_tensor_to_pil_frames(processed_video)
+
+        if isinstance(processed_video, (list, tuple)):
+            return list(processed_video)
+
+        raise TypeError(f"Unsupported processed video type for T-GRPO shuffle: {type(processed_video)}")
+
+    def _build_shuffled_video_mm_data(self, mm_data: dict[str, Any]) -> Optional[dict[str, Any]]:
+        shuffled_mm_data = deepcopy(mm_data)
+        shuffled_videos = []
+        for video in mm_data.get("videos") or []:
+            frames = self._sample_video_frames_for_shuffle(video)
+            if len(frames) == 0:
+                return None
+
+            indices = np.random.permutation(len(frames))
+            shuffled_videos.append([frames[i] for i in indices])
+
+        shuffled_mm_data["videos"] = shuffled_videos
+        return shuffled_mm_data
+
+    def _build_shuffled_gen_batch(self, gen_batch: DataProto, video_indices: list[int]) -> Optional[DataProto]:
+        if len(video_indices) == 0:
+            return None
+
+        shuffled_gen_batch = gen_batch[video_indices]
+        shuffled_gen_batch.meta_info = deepcopy(gen_batch.meta_info)
+        shuffled_n = max(1, int(self.config.worker.rollout.n * self.config.algorithm.shuffled_rollout_ratio))
+        shuffled_gen_batch.meta_info["n"] = shuffled_n
+
+        shuffled_mm_data = []
+        for mm_data in shuffled_gen_batch.non_tensor_batch["multi_modal_data"]:
+            try:
+                shuffled = self._build_shuffled_video_mm_data(mm_data)
+            except Exception as exc:
+                print(f"[T-GRPO] skip temporal shuffle for one sample: {exc}")
+                return None
+            if shuffled is None:
+                return None
+            shuffled_mm_data.append(shuffled)
+
+        shuffled_gen_batch.non_tensor_batch["multi_modal_data"] = np.array(shuffled_mm_data, dtype=object)
+        return shuffled_gen_batch
+
+    @staticmethod
+    def _add_last_token_bonus(reward_tensor: torch.Tensor, response_mask: torch.Tensor, bonus: np.ndarray) -> None:
+        if len(bonus) == 0:
+            return
+
+        bonus_tensor = torch.as_tensor(bonus, dtype=reward_tensor.dtype, device=reward_tensor.device)
+        response_lengths = response_mask.sum(dim=-1).long().to(reward_tensor.device)
+        valid = response_lengths > 0
+        if not torch.any(valid):
+            return
+
+        row_idx = torch.arange(reward_tensor.shape[0], device=reward_tensor.device)[valid]
+        col_idx = response_lengths[valid] - 1
+        reward_tensor[row_idx, col_idx] += bonus_tensor[valid]
+
+    def _apply_tgrpo_rewards(
+        self,
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        reward_metrics: dict[str, list[float]],
+        shuffled_batch: Optional[DataProto],
+    ) -> None:
+        accuracy = np.asarray(reward_metrics.get("accuracy", [0.0] * len(batch)), dtype=np.float32)
+        temporal_bonus = np.zeros(len(batch), dtype=np.float32)
+        temporal_applied = np.zeros(len(batch), dtype=np.float32)
+        shuffled_group_accuracy = []
+
+        if self.config.algorithm.temporal and shuffled_batch is not None:
+            shuffled_reward_tensor, shuffled_reward_metrics = ray.get(self.reward_fn.compute_reward.remote(shuffled_batch))
+            del shuffled_reward_tensor
+
+            shuffled_accuracy = np.asarray(
+                shuffled_reward_metrics.get("accuracy", [0.0] * len(shuffled_batch)), dtype=np.float32
+            )
+            ordered_uids = np.asarray(batch.non_tensor_batch["uid"], dtype=object)
+            shuffled_uids = np.asarray(shuffled_batch.non_tensor_batch["uid"], dtype=object)
+            video_uids = set(shuffled_uids.tolist())
+
+            for uid in video_uids:
+                ordered_idx = np.flatnonzero(ordered_uids == uid)
+                shuffled_idx = np.flatnonzero(shuffled_uids == uid)
+                if len(ordered_idx) == 0 or len(shuffled_idx) == 0:
+                    continue
+
+                ordered_acc = float(np.mean(accuracy[ordered_idx]))
+                shuffled_acc = float(np.mean(shuffled_accuracy[shuffled_idx]))
+                shuffled_group_accuracy.extend([shuffled_acc] * len(ordered_idx))
+
+                if ordered_acc >= self.config.algorithm.temporal_compare_ratio * shuffled_acc:
+                    correct_idx = ordered_idx[accuracy[ordered_idx] > self.config.algorithm.temporal_correct_threshold]
+                    temporal_bonus[correct_idx] = self.config.algorithm.temporal_reward
+                    temporal_applied[correct_idx] = 1.0
+
+        length_bonus = np.zeros(len(batch), dtype=np.float32)
+        if self.config.algorithm.len_control:
+            response_lengths = batch.batch["response_mask"].sum(dim=-1).detach().cpu().numpy()
+            correct = accuracy > self.config.algorithm.temporal_correct_threshold
+            in_range = (response_lengths >= self.config.algorithm.len_min) & (
+                response_lengths <= self.config.algorithm.len_max
+            )
+            length_bonus[correct & in_range] = self.config.algorithm.len_reward
+
+        total_bonus = temporal_bonus + length_bonus
+        self._add_last_token_bonus(reward_tensor, batch.batch["response_mask"], total_bonus)
+
+        final_overall = reward_tensor.sum(dim=-1).detach().cpu().tolist()
+        reward_metrics["final_overall"] = final_overall
+        reward_metrics["temporal_bonus"] = temporal_bonus.tolist()
+        reward_metrics["temporal_applied"] = temporal_applied.tolist()
+        if len(shuffled_group_accuracy) > 0:
+            reward_metrics["shuffled_accuracy"] = shuffled_group_accuracy
+        reward_metrics["length_bonus"] = length_bonus.tolist()
+
     def _make_batch_data(self, metrics: dict[str, Any]) -> DataProto:
         batch = None
         all_metrics = defaultdict(list)
+        has_reward_metrics = False
         num_try_make_batch = 0
         print("Start generating batch...")
         while True:
@@ -498,8 +657,23 @@ class RayPPOTrainer:
                 meta_info_keys=["min_pixels", "max_pixels", "video_fps"],
             )
 
+            video_indices = self._get_video_indices(gen_batch)
+            shuffled_gen_batch = None
+            if self.config.algorithm.temporal:
+                shuffled_gen_batch = self._build_shuffled_gen_batch(gen_batch, video_indices)
+
             # generate a batch
             gen_batch_output = self.actor_rollout_ref_wg.generate_sequences(gen_batch)
+            shuffled_gen_batch_output = None
+            if shuffled_gen_batch is not None:
+                shuffled_n = shuffled_gen_batch.meta_info["n"]
+                shuffled_gen_batch, shuffled_pad_size = pad_dataproto_to_divisor(
+                    shuffled_gen_batch, self.actor_rollout_ref_wg.world_size
+                )
+                shuffled_gen_batch_output = self.actor_rollout_ref_wg.generate_sequences(shuffled_gen_batch)
+                shuffled_gen_batch_output = unpad_dataproto(
+                    shuffled_gen_batch_output, pad_size=shuffled_pad_size * shuffled_n
+                )
 
             if self.config.algorithm.adv_estimator == "remax":
                 gen_baseline_batch = deepcopy(gen_batch)
@@ -516,15 +690,34 @@ class RayPPOTrainer:
                 del gen_baseline_batch, gen_baseline_output
 
             # repeat to align with repeated responses in rollout
+            prompt_only_batch = new_batch
             new_batch = new_batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
             new_batch = new_batch.union(gen_batch_output)
 
-            # filter group
-            if self.config.algorithm.online_filtering:
+            if self.config.algorithm.temporal or self.config.algorithm.len_control:
                 reward_tensor, reward_metrics = ray.get(self.reward_fn.compute_reward.remote(new_batch))
+                if shuffled_gen_batch_output is not None:
+                    shuffled_n = shuffled_gen_batch.meta_info["n"]
+                    base_video_batch = prompt_only_batch[video_indices]
+                    shuffled_batch = base_video_batch.repeat(repeat_times=shuffled_n, interleave=True)
+                    shuffled_batch = shuffled_batch.union(shuffled_gen_batch_output)
+                else:
+                    shuffled_batch = None
+
+                self._apply_tgrpo_rewards(new_batch, reward_tensor, reward_metrics, shuffled_batch)
                 new_batch.batch["token_level_scores"] = reward_tensor
                 for k, v in reward_metrics.items():
                     all_metrics[k].extend(v)
+                has_reward_metrics = True
+
+            # filter group
+            if self.config.algorithm.online_filtering:
+                if "token_level_scores" not in new_batch.batch:
+                    reward_tensor, reward_metrics = ray.get(self.reward_fn.compute_reward.remote(new_batch))
+                    new_batch.batch["token_level_scores"] = reward_tensor
+                    for k, v in reward_metrics.items():
+                        all_metrics[k].extend(v)
+                    has_reward_metrics = True
 
                 filter_scores = reward_metrics[self.config.algorithm.filter_key]
                 uids = new_batch.non_tensor_batch["uid"]
@@ -558,7 +751,7 @@ class RayPPOTrainer:
                     )
             else:
                 print(f"{current_batch_size=} >= {rollout_batch_size=}. Finish generating.")
-                if self.config.algorithm.online_filtering:
+                if has_reward_metrics:
                     metrics.update({f"reward/{k}": v for k, v in reduce_metrics(all_metrics).items()})
 
                 return batch[: self.config.data.rollout_batch_size * self.config.worker.rollout.n]

@@ -32,6 +32,15 @@ from ...utils.model_utils import print_gpu_memory_usage
 from .base import BaseShardingManager
 
 
+def _get_vllm_tensor_model_parallel_device_group():
+    if hasattr(vllm_ps, "get_tensor_model_parallel_group"):
+        group = vllm_ps.get_tensor_model_parallel_group()
+    else:
+        group = vllm_ps.get_tp_group()
+
+    return getattr(group, "device_group", group)
+
+
 class FSDPVLLMShardingManager(BaseShardingManager):
     def __init__(
         self,
@@ -49,7 +58,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         self.world_size = dist.get_world_size()
         self.tp_size = vllm_ps.get_tensor_model_parallel_world_size()
         self.tp_rank = vllm_ps.get_tensor_model_parallel_rank()
-        self.tp_group = vllm_ps.get_tensor_model_parallel_group().device_group
+        self.tp_group = _get_vllm_tensor_model_parallel_device_group()
 
         # Record freed bytes to estimate memory usage correctly
         # https://github.com/vllm-project/vllm/pull/11743#issuecomment-2754338119

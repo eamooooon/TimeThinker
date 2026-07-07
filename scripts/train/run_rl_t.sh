@@ -11,7 +11,7 @@ export SWANLAB_DIR=${SWANLAB_DIR:-swanlog}
 
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 PYTHON=${PYTHON:-.venv_rl/bin/python}
-CONFIG=${CONFIG:-config/rl/qwen3_rl.yaml}
+CONFIG=${CONFIG:-config/rl/qwen3_rl_t.yaml}
 
 export PYTHONPATH="${REPO_ROOT}/EasyR1${PYTHONPATH:+:${PYTHONPATH}}"
 

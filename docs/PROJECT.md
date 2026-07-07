@@ -32,7 +32,7 @@
 
 ## 2. 和 TimeThinker README 的差异
 
-TimeThinker README 期望的是：
+TimeThinker 原始 README 期望的是：
 
 - `EasyR1/data/timethinker_rl_train.json`
 - `timethinker_sft_image.json`
@@ -59,6 +59,13 @@ TimeThinker README 期望的是：
 - `regression`
 
 因此，Video-R1 可以支撑图像/视频 QA reasoning 训练，但不能完整替代 TimeThinker-600k。特别是 grounding、tracking、segmentation 这些结构化视觉定位任务，当前数据基本不具备对应标注。
+
+当前仓库已经完成本地格式适配，实际训练入口使用的是：
+
+- SFT image：`LLaMA-Factory/data/timethinker_sft_image.json`
+- SFT video：`LLaMA-Factory/data/timethinker_sft_video.json`
+- RL train：`EasyR1/data/timethinker_rl_train_split.json`
+- RL val：`EasyR1/data/timethinker_rl_val_512.json`
 
 ## 3. 当前训练目标的合理定位
 
@@ -193,7 +200,7 @@ SFT 文件比 RL 文件多一个 `process` 字段：
 
 ## 6. 数据适配策略
 
-建议采用：
+当前采用：
 
 > 把 Video-R1 数据改造成 TimeThinker 训练代码期望的格式，而不是大改训练脚本。
 
@@ -201,15 +208,17 @@ SFT 文件比 RL 文件多一个 `process` 字段：
 
 - TimeThinker 的 SFT 和 RL 脚本已经围绕固定数据接口写好。
 - `LLaMA-Factory` 期望 `timethinker_sft_image` 和 `timethinker_sft_video` 两个注册数据集。
-- `scripts/train/run_rl.sh` 期望 `EasyR1/data/timethinker_rl_train.json`。
+- `scripts/train/run_rl.sh` 通过 `config/rl/qwen3_rl.yaml` 读取 `EasyR1/data/timethinker_rl_train_split.json` 和 `EasyR1/data/timethinker_rl_val_512.json`。
 - reward function 已经支持 Video-R1 当前的 `problem_type`。
 - 改数据是一次性适配；改训练脚本容易把路径、字段、reward、prompt builder 的兼容问题扩散到多个地方。
 
-推荐产物：
+当前产物：
 
 - `LLaMA-Factory/data/timethinker_sft_image.json`
 - `LLaMA-Factory/data/timethinker_sft_video.json`
-- `EasyR1/data/timethinker_rl_train.json`
+- `EasyR1/data/timethinker_rl_train.json`：完整转换文件。
+- `EasyR1/data/timethinker_rl_train_split.json`：当前训练使用的 train split。
+- `EasyR1/data/timethinker_rl_val_512.json`：当前验证集。
 
 转换时应保留：
 
@@ -291,14 +300,14 @@ RL 阶段需要大量可判分输出。Instruct + SFT cold start 的路线可以
 
 ## 9. 后续实施建议
 
-建议按以下顺序推进：
+当前基础链路已经跑通，后续推进重点是：
 
-1. 写数据转换脚本，把 Video-R1 SFT 数据拆成 image / video 两个 LLaMA-Factory sharegpt 风格文件。
-2. 写 RL 数据适配脚本，生成 EasyR1 能直接读取的 `EasyR1/data/timethinker_rl_train.json`。
-3. 解压媒体 zip，或者实现路径映射，确保 `path` 字段能被 image/video loader 读取。
-4. 先抽样 100 条 image + 100 条 video 跑 SFT preprocessing。
-5. 再抽样小规模 RL smoke test，确认 reward 正常返回非零分。
-6. 最后再扩大到全量训练。
+1. 每次新实验固定 config、模型目录和 SwanLab run name，避免命名漂移。
+2. SFT 继续按 `docs/sft_ablation.md` 做单变量消融。
+3. RL 继续按 `docs/rl_ablation.md` 比较 GRPO、EMA-GRPO、T-GRPO、online filtering 和 KL。
+4. 评测先用 `MAX_SAMPLES` 快速验证，再对候选模型跑完整 benchmark。
+5. 对慢 benchmark 使用 frame cache，并记录 `_summary.md` 中的耗时和 cache 命中。
+6. bad case 统一记录到 `docs/bad_case.md` 的模板中。
 
 当前最重要的边界是：
 

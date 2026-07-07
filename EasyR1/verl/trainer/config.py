@@ -101,6 +101,24 @@ class AlgorithmConfig:
     """filter out low reward samples if online filtering"""
     filter_high: float = 0.99
     """filter out high reward samples if online filtering"""
+    temporal: bool = False
+    """enable Video-R1 style T-GRPO temporal reward shaping"""
+    shuffled_rollout_ratio: float = 0.5
+    """number of shuffled-frame rollouts as a ratio of rollout.n"""
+    temporal_reward: float = 0.3
+    """reward bonus added to correct ordered video responses when they beat shuffled frames"""
+    temporal_compare_ratio: float = 0.8
+    """ordered accuracy must be >= this ratio * shuffled accuracy"""
+    temporal_correct_threshold: float = 0.1
+    """accuracy threshold for responses eligible for temporal reward"""
+    len_control: bool = False
+    """enable Video-R1 length-control reward"""
+    len_reward: float = 0.2
+    """reward bonus for correct responses in the target length range"""
+    len_min: int = 320
+    """minimum response length for length-control reward"""
+    len_max: int = 512
+    """maximum response length for length-control reward"""
 
 
 @dataclass
