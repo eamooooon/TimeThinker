@@ -4,7 +4,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-LOG_DIR=${LOG_DIR:-logs}
+LOG_DIR=${LOG_DIR:-logs/v1}
 LIST_LOG_DIR=${LIST_LOG_DIR:-$LOG_DIR}
 RUN_BENCH=${RUN_BENCH:-scripts/eval/run_bench.sh}
 CONTINUE_ON_ERROR=${CONTINUE_ON_ERROR:-0}
@@ -14,37 +14,32 @@ mkdir -p "$LIST_LOG_DIR"
 usage() {
   cat <<'EOF'
 Usage:
-  bash scripts/eval/run_bench_list.sh MODEL_PATH [MODEL_PATH2 ...]
+  bash scripts/eval/run_bench_list_v1.sh MODEL_PATH [MODEL_PATH2 ...]
 
 Examples:
-  bash scripts/eval/run_bench_list.sh \
-    models/TimeThinker-4B-SFT-v3-10000-1ep \
-    models/TimeThinker-4B-RL-Zero-100-van-v2/global_step_100/actor/huggingface \
-    models/TimeThinker-4B-RL-Zero-100-ema-v2/global_step_100/actor/huggingface
+  bash scripts/eval/run_bench_list_v1.sh \
+    Qwen/Qwen3-VL-4B-Instruct \
+    models/TimeThinker-4B-SFT-v3-10000-1ep
 
-Optional env forwarded to run_bench.sh:
-  DATASETS=eval_mvbench.json,eval_videomathqa.json
-  MAX_FRAMES=16
-  BATCH_SIZE=64
-  MAX_SAMPLES=100
-  RUN_PARALLEL=1
-  EVAL_GPUS=0,1,2,3  # defaults to CUDA_VISIBLE_DEVICES when unset
-  EVAL_SCHEDULE=balanced|listed  # balanced reorders benchmarks by estimated time
+Defaults:
+  EVAL_BENCH_SCRIPT=Evaluation/Eval/eval_bench_v1.py
+  OUT_ROOT_BASE=Evaluation/results-v1-rerun
   FRAME_CACHE_DIR=Evaluation/data/.cache/eval_frames
-  DISABLE_FRAME_CACHE=0
-  CUDA_VISIBLE_DEVICES=0,1,2,3
-  PYTHON=.venv_eval/bin/python
-  OUT_ROOT_BASE=Evaluation/results
-  LOG_DIR=logs
-
-Optional env for this list runner:
-  LIST_LOG_DIR=logs
-  RUN_BENCH=scripts/eval/run_bench.sh
-  CONTINUE_ON_ERROR=0|1
+  VIDEO_READER=auto
 
 Notes:
-  Models are evaluated one by one. Dataset parallelism inside each model run is
-  still controlled by RUN_PARALLEL in scripts/eval/run_bench.sh.
+  Frame cache only caches decoded video frames. Model outputs are resumed only
+  when eval_*.json already exists under OUT_ROOT_BASE/<model>/framesN.
+
+Useful env:
+  OUT_ROOT_BASE=Evaluation/results-v1-rerun
+  DATASETS=eval_mvbench.json,eval_tempcompass.json
+  MAX_FRAMES=16
+  BATCH_SIZE=64
+  RUN_PARALLEL=1
+  EVAL_GPUS=0,1,2,3
+  EVAL_SCHEDULE=balanced|listed
+  CONTINUE_ON_ERROR=0|1
 EOF
 }
 
@@ -99,16 +94,22 @@ run_one() {
 
   model="$(normalize_model_path "$raw_model")"
   tag="$(model_tag_for "$model")"
-  log_path="${LIST_LOG_DIR%/}/eval_list_${idx}_${tag}.log"
+  log_path="${LIST_LOG_DIR%/}/eval_list_v1_${idx}_${tag}.log"
 
   warn_if_local_model_missing "$model"
 
-  echo "[START] ${idx}: ${model}"
+  echo "[START][v1] ${idx}: ${model}"
   echo "[LOG] ${log_path}"
   echo "[RUN_BENCH] ${RUN_BENCH}"
-  echo "[RUN_PARALLEL] ${RUN_PARALLEL:-1}"
+  echo "[OUT_ROOT_BASE] ${OUT_ROOT_BASE:-Evaluation/results-v1-rerun}"
+  echo "[FRAME_CACHE_DIR] ${FRAME_CACHE_DIR:-${DATASET_PREFIX:-$REPO_ROOT/Evaluation/data}/.cache/eval_frames}"
 
-  MODEL_PATH="$model" bash "$RUN_BENCH" 2>&1 | tee "$log_path"
+  MODEL_PATH="$model" \
+  EVAL_BENCH_SCRIPT="${EVAL_BENCH_SCRIPT:-Evaluation/Eval/eval_bench_v1.py}" \
+  EVAL_BENCH_SUPPORTS_FRAME_CACHE="${EVAL_BENCH_SUPPORTS_FRAME_CACHE:-1}" \
+  OUT_ROOT_BASE="${OUT_ROOT_BASE:-Evaluation/results-v1-rerun}" \
+  VIDEO_READER="${VIDEO_READER:-auto}" \
+  bash "$RUN_BENCH" 2>&1 | tee "$log_path"
 
   local rc="${PIPESTATUS[0]}"
   if [[ "$rc" -ne 0 ]]; then
@@ -117,7 +118,7 @@ run_one() {
     return "$rc"
   fi
 
-  echo "[DONE] ${model}"
+  echo "[DONE][v1] ${model}"
 }
 
 idx=0
@@ -129,15 +130,15 @@ for model in "$@"; do
   if [[ "$rc" -ne 0 ]]; then
     status="$rc"
     if [[ "$CONTINUE_ON_ERROR" != "1" ]]; then
-      echo "[STOP] remaining model eval runs will not start."
+      echo "[STOP] remaining v1 eval runs will not start."
       exit "$status"
     fi
   fi
 done
 
 if [[ "$status" -ne 0 ]]; then
-  echo "[DONE WITH FAILURES] model eval list finished with status ${status}."
+  echo "[DONE WITH FAILURES] v1 model eval list finished with status ${status}."
   exit "$status"
 fi
 
-echo "[ALL DONE] model eval list finished."
+echo "[ALL DONE] v1 model eval list finished."

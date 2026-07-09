@@ -7,11 +7,12 @@ cd "$REPO_ROOT"
 export OMP_NUM_THREADS=8
 export DECORD_EOF_RETRY_MAX=2048001
 export FORCE_QWENVL_VIDEO_READER=${FORCE_QWENVL_VIDEO_READER:-decord}
+export RL_FRAME_CACHE_DIR=${RL_FRAME_CACHE_DIR:-data/.cache/rl_frames}
 export SWANLAB_DIR=${SWANLAB_DIR:-swanlog}
 
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 PYTHON=${PYTHON:-.venv_rl/bin/python}
-CONFIG=${CONFIG:-config/rl/qwen3_rl.yaml}
+CONFIG=${CONFIG:-config/rl/qwen3_rl_bs16.yaml}
 
 export PYTHONPATH="${REPO_ROOT}/EasyR1${PYTHONPATH:+:${PYTHONPATH}}"
 

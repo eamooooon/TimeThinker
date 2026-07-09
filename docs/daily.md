@@ -2,6 +2,140 @@
 
 记录训练、评测、数据和工程优化的日常推进。日期按 UTC 工作区时间记录。
 
+## 2026-07-08
+
+### Eval 结果汇总与文档更新
+
+- 汇总 `Evaluation/results` 下的新一轮 8 项 benchmark 结果，并更新 `docs/eval.md`。
+- 当前主表改为 8 项 benchmark 的 `answer_acc` macro average：
+  - LongVideoReason
+  - MMVU
+  - MVBench
+  - TempCompass
+  - VideoMathQA
+  - VideoMME
+  - VideoMMMU
+  - VSIBench
+- 明确 `Avg` 是 benchmark 级简单未加权平均，不是按样本数加权。
+- 补充 weighted 诊断指标含义：
+  - `weighted avg_tokens`：按样本数加权的平均输出 token 数。
+  - `weighted trunc_rate`：按样本数加权的生成截断比例。
+  - `weighted invalid_rate` / `weighted extract_rate`：用于判断答案抽取和格式稳定性。
+- 将 `TimeThinker-4B-SFT-v5-10k` 和 `Qwen3-VL-4B-Instruct` baseline 的新测评结果写入 `docs/eval.md`。
+- 从日志和 summary 记录补回 v2 RL 模型的实际墙钟时间：
+  - `TimeThinker-4B-RL-Zero-100-van-v2`：约 `1h42m13s`，benchmark elapsed 累加 `357.75m`。
+  - `TimeThinker-4B-RL-Zero-100-ema-v2`：约 `35m08s`，benchmark elapsed 累加 `109.56m`。
+
+### 当前 Eval 口径修正
+
+- 发现新版严格格式评测会把部分基座/旧模型的答案能力和格式错误混在一起，尤其 `Qwen3-VL-4B-Instruct` 分数被严重压低。
+- 修改 `Evaluation/Eval/eval_bench.py` 的答案抽取逻辑：
+  - `answer_acc` 只看答案是否正确，不再要求严格 `<think>/<answer>` 格式。
+  - 多选题支持从 `<answer>`、句式 `"answer is A"`、尾部单字母等形式中抽取选项。
+  - 数值题支持从自然语言答案中抽取最后/显式数值。
+  - `<think>`、strict format、invalid answer、extract rate 改为诊断指标，而不是直接决定 `answer_acc`。
+- 增加 `--rescore_existing` 思路/能力，用当前抽取逻辑重算已有输出，避免为了改 scoring 重跑昂贵生成。
+- 在 `docs/eval.md` 中说明当前 `answer_acc` 已经是 answer-only 口径。
+
+### v1 Prompt 复原与复跑
+
+- 从历史版本恢复 `Evaluation/Eval/eval_bench_v1.py`，用于对比旧 prompt 评测口径。
+- 新增/整理 `scripts/eval/run_bench_list_v1.sh`，支持一次传入多个模型串行跑 v1 eval。
+- 删除单模型版 `run_bench_v1.sh`，避免脚本入口分裂。
+- 给 v1 eval 补上 frame cache 支持，使其能复用 `Evaluation/data/.cache/eval_frames`，避免每次从头解码视频。
+- 修复 v1 list runner 的 cache/resume 语义：
+  - 已有完整输出时跳过。
+  - 有部分输出时继续 resume。
+  - cache 只负责复用视频帧，不等于结果文件可以自动跳过。
+- 后续又清理了 v1 prompt 中已经不属于当前 benchmark 的 grounding / tracking / segmentation JSON 输出模板，只保留当前可能用到的 QA 类型：
+  - `multiple choice`
+  - `numerical`
+  - `OCR`
+  - `open-ended`
+  - `free-form`
+  - `regression`
+  - `math`
+- 统计当前 `Evaluation/data` 实际 problem type：
+  - `multiple choice`：19657
+  - `regression`：2640
+  - `numerical`：18
+
+### v1-rerun 结果与 prompt 敏感性分析
+
+- 汇总 `Evaluation/results-v1-rerun`：
+  - 完整 8 项模型共 12 个。
+  - v1-rerun 最强完整模型为 `TimeThinker-4B-SFT-v3-10000`，Avg8 约 `55.35`。
+  - `TimeThinker-4B-RL-Zero-100-ema-v2` Avg8 约 `55.15`。
+  - `TimeThinker-4B-RL-Zero-100-van-v2` Avg8 约 `53.72`。
+- 发现当前 strict-ish prompt 和 v1 prompt 会改变模型排序：
+  - 当前 `Evaluation/results` 更偏向 RL，RL v2 模型约 `56+`。
+  - `results-v1-rerun` 中 SFT 更强，部分 RL 下降明显。
+- 对比样本后发现差异主要来自 prompt regime：
+  - 当前 prompt 更强制最后输出单个选项字母，减少 option mapping 和尾部抽取错误。
+  - v1 prompt 更自然，允许解释后再给答案，对没有严格学 `<think>` 的模型更友好。
+- 找了两类典型样本：
+  - SFT 在 v1 下正确但 RL 错：动作顺序、yes/no、计数、空间估计等。
+  - RL 在 v1 下错但当前 prompt 下正确：选项字母映射、`Not available`、yes/no 反转、最后答案未收敛等。
+- 结论：v1 更像 answer-only benchmark 能力测试；当前 prompt 更像 TimeThinker 接口服从 + 答题测试。两者都不能单独作为全部结论。
+
+### Video-R1 原仓库 Prompt 对齐
+
+- 查找 `/tianyuesong/zy/videor1` 原仓库评测 prompt，定位到：
+  - `/tianyuesong/zy/videor1/src/eval_bench.py`
+  - `/tianyuesong/zy/videor1/src/r1-v/src/open_r1/sft_video.py`
+- 原仓库 benchmark prompt 核心是：
+  - 要求模型像人一样深入思考。
+  - 鼓励使用 `"let me think"`、`"wait"`、`"Hmm"`、`"let's break it down"` 等自然思考表达。
+  - 要求 reasoning 放在 `<think>...</think>`，final answer 放在 `<answer>...</answer>`。
+  - 多选题要求 `<answer>` 内只给单个选项字母。
+- 判断原仓库 prompt 更接近 v1，而不是当前严格结构 prompt。
+- 但原仓库比我们的 v1 更强调自然长推理和 self-reflection，因此后续若要复现 Video-R1，应单独建立 `original prompt eval`，不要只在 v1/current 二选一。
+
+### 格式奖励与 RL 目标反思
+
+- 统计发现：
+  - 旧 `TimeThinker-4B-RL-Zero-100-ema` 在 v1 下 `<think>` 率为 `0%`，但 answer accuracy 很高。
+  - v1-rerun `ema-v2` 也基本不输出 `<think>`，但能得到较高分。
+  - SFT 模型几乎稳定输出 `<think>/<answer>`，但在某些 v1 口径下不一定排名最高。
+- 这说明强制 `<think>` 格式和 benchmark answer accuracy 不完全一致。
+- 阶段性判断：
+  - `<answer>` 对抽取和评测很重要，应保留。
+  - `<think>` 不宜作为过强硬约束或高权重 reward，尤其在单选题占比很高时可能优化到“格式更好但答案不更强”。
+  - 后续 RL reward 应考虑把格式奖励降权，或者只奖励答案可抽取，而不是强制完整 `<think>...</think><answer>...</answer>`。
+
+### SFT 消融与实验优先级调整
+
+- 分析 `SFT-v9-10k-3ep` 为什么明显强：
+  - 相比 1 epoch，3 epoch 让模型在固定 10k 高质量数据上反复学习，可能更充分掌握目标 benchmark 相关能力。
+  - 训练 loss 阶段性下降，说明 1 epoch 可能还没学透。
+- 分析 `SFT-v10-50k` 数据更多但效果反而不如 v2/v9：
+  - 更大数据量不等于更强，可能引入与 benchmark 不对齐的分布。
+  - 在同样学习率下，更多数据可能导致每类能力都学到一点，但目标能力不够扎实。
+  - 学习率相对数据规模/训练步数也可能偏大，需要结合 loss 曲线和输出质量判断。
+- 明确数据分布不对齐的解决方向：
+  - 优先做目标 benchmark 相关数据筛选/重加权。
+  - 保留小而准的 10k 主线。
+  - 用 checkpoint selection 和 epoch 数控制扎实程度，而不是盲目扩大数据。
+- 精简 `docs/sft_ablation.md` 待验证项：
+  - Scheduler / warmup 暂不作为优先实验。
+  - Weight decay / gradient norm 暂不作为优先实验。
+  - SFT -> RL 迁移验证本来就是主线，不需要作为独立待验证项堆在消融列表里。
+- 当前 SFT 主线优先级：
+  - 以 `SFT-v9-10k-3ep` 作为最强 SFT 候选。
+  - 优先做 checkpoint/epoch selection。
+  - 暂缓大规模 scheduler、weight decay、LoRA、batch/GA 网格。
+
+### 当前评测策略结论
+
+- 后续建议同时保留三类口径：
+  - `current answer-only`：主表，答案正确为主，格式指标单独诊断。
+  - `v1/original prompt`：用于判断自然 prompt 下真实 answer ability。
+  - `format diagnostics`：用于判断模型是否适合 TimeThinker 接口和后续 RL。
+- 不再简单用单一分数决定模型优劣，尤其不能把“格式服从”误当成“视觉推理能力提升”。
+- 对后续主线的影响：
+  - 如果目标是 benchmark answer accuracy，强 `<think>` reward 可能不是必要条件。
+  - 如果目标是可控推理接口，则必须同时报告 strict/extract/invalid，而不是只看 accuracy。
+
 ## 2026-07-07
 
 ### 数据侧整理与对齐
@@ -377,6 +511,45 @@ RESULT_SUFFIX=_first MAX_SAMPLES=800 bash scripts/eval/run_bench.sh
 # 第二次：复用 cache
 RESULT_SUFFIX=_cache_hit MAX_SAMPLES=800 bash scripts/eval/run_bench.sh
 ```
+
+#### 模型级墙钟时间口径
+
+注意：`_summary.md` 里的 `elapsed_min` 是单个 benchmark 的耗时。多个 benchmark 并行跑时，不能把各行 `elapsed_min` 直接相加当作模型评测的真实等待时间。
+
+- 各 benchmark `elapsed_min` 相加：更接近 GPU task time / workload total。
+- 模型级实际等待时间：应按 `logs/eval_list_*.log` 的 `DATE_SUFFIX` 到结果目录 `_summary.json` 写出时间计算。
+- `run_bench.sh` 在 `RUN_PARALLEL=1` 时按 GPU 数并行调度 benchmark，某个 GPU 空出来后继续接下一项，因此墙钟时间由最长的 GPU 任务链决定。
+
+已完成的两组 v2 full eval 墙钟时间：
+
+| 模型 | eval list 开始 | summary 写出 | 实际墙钟时间 | benchmark elapsed 累加 |
+|---|---:|---:|---:|---:|
+| `TimeThinker-4B-RL-Zero-100-van-v2` | `2026-07-07 16:16:55` | `2026-07-07 17:59:08` | `1h42m53s` | `357.75m` |
+| `TimeThinker-4B-RL-Zero-100-ema-v2` | `2026-07-07 17:59:08` | `2026-07-07 18:34:15` | `35m08s` | `109.56m` |
+
+结论：后续记录“一个模型评测花了多久”时优先写墙钟时间；`elapsed_min` 累加只用于分析 benchmark workload 和 cache/preprocess 成本。
+
+#### 并行 benchmark 调度优化
+
+`scripts/eval/run_bench.sh` 新增 `EVAL_SCHEDULE`：
+
+- `EVAL_SCHEDULE=balanced`：默认值。按近期 cache-hit full eval 的历史耗时从长到短重排 benchmark 队列，再交给动态 GPU 调度器。这样 4 路并行时，长任务先占住 GPU，短任务会在 GPU 空闲后补上，近似实现“最长 + 最短”配平。
+- `EVAL_SCHEDULE=listed`：保留 `BENCHMARK_DATASETS` / `DATASETS` 给出的原始顺序，便于复现旧调度。
+
+默认 8 项 full eval 的 balanced 入队顺序：
+
+```text
+eval_mvbench.json
+eval_tempcompass.json
+eval_videomme.json
+eval_longvideoreason.json
+eval_vsibench.json
+eval_videommmu.json
+eval_videomathqa.json
+eval_mmvu.json
+```
+
+按 `ema-v2` cache-hit 耗时估算，原调度的最长 GPU 任务链约 `35m`，balanced 后预计可降到约 `30m` 左右。实际收益仍取决于模型输出长度、cache 命中、vLLM 初始化和视频 IO 抖动。
 
 ### 当前推荐的快速验证方式
 

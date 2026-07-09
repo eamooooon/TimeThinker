@@ -504,7 +504,13 @@ class RayPPOTrainer:
         if isinstance(video, (list, tuple)):
             return list(video)
 
-        processed_video, _ = process_video(video, return_fps=True)
+        processed_video, _ = process_video(
+            video,
+            min_pixels=self.config.data.min_pixels,
+            max_pixels=self.config.data.max_pixels,
+            video_fps=self.config.data.video_fps,
+            return_fps=True,
+        )
         if isinstance(processed_video, tuple):
             processed_video = processed_video[0]
 
@@ -579,6 +585,15 @@ class RayPPOTrainer:
         temporal_bonus = np.zeros(len(batch), dtype=np.float32)
         temporal_applied = np.zeros(len(batch), dtype=np.float32)
         shuffled_group_accuracy = []
+        temporal_group_counts = {
+            "ordered_correct_shuffled_wrong": 0,
+            "ordered_correct_shuffled_correct": 0,
+            "ordered_wrong_shuffled_correct": 0,
+            "ordered_wrong_shuffled_wrong": 0,
+            "ordered_gt_shuffled": 0,
+            "compare_pass": 0,
+            "total": 0,
+        }
 
         if self.config.algorithm.temporal and shuffled_batch is not None:
             shuffled_reward_tensor, shuffled_reward_metrics = ray.get(self.reward_fn.compute_reward.remote(shuffled_batch))
@@ -600,8 +615,24 @@ class RayPPOTrainer:
                 ordered_acc = float(np.mean(accuracy[ordered_idx]))
                 shuffled_acc = float(np.mean(shuffled_accuracy[shuffled_idx]))
                 shuffled_group_accuracy.extend([shuffled_acc] * len(ordered_idx))
+                ordered_correct = ordered_acc > self.config.algorithm.temporal_correct_threshold
+                shuffled_correct = shuffled_acc > self.config.algorithm.temporal_correct_threshold
+                temporal_group_counts["total"] += 1
+                temporal_group_counts["ordered_gt_shuffled"] += int(ordered_acc > shuffled_acc)
 
-                if ordered_acc >= self.config.algorithm.temporal_compare_ratio * shuffled_acc:
+                compare_pass = ordered_acc >= self.config.algorithm.temporal_compare_ratio * shuffled_acc
+                temporal_group_counts["compare_pass"] += int(compare_pass)
+
+                if ordered_correct and shuffled_correct:
+                    temporal_group_counts["ordered_correct_shuffled_correct"] += 1
+                elif ordered_correct and not shuffled_correct:
+                    temporal_group_counts["ordered_correct_shuffled_wrong"] += 1
+                elif not ordered_correct and shuffled_correct:
+                    temporal_group_counts["ordered_wrong_shuffled_correct"] += 1
+                else:
+                    temporal_group_counts["ordered_wrong_shuffled_wrong"] += 1
+
+                if compare_pass:
                     correct_idx = ordered_idx[accuracy[ordered_idx] > self.config.algorithm.temporal_correct_threshold]
                     temporal_bonus[correct_idx] = self.config.algorithm.temporal_reward
                     temporal_applied[correct_idx] = 1.0
@@ -624,6 +655,25 @@ class RayPPOTrainer:
         reward_metrics["temporal_applied"] = temporal_applied.tolist()
         if len(shuffled_group_accuracy) > 0:
             reward_metrics["shuffled_accuracy"] = shuffled_group_accuracy
+        if temporal_group_counts["total"] > 0:
+            total = float(temporal_group_counts["total"])
+            reward_metrics["temporal_video_groups"] = [float(temporal_group_counts["total"])]
+            reward_metrics["temporal_ordered_correct_shuffled_wrong_ratio"] = [
+                temporal_group_counts["ordered_correct_shuffled_wrong"] / total
+            ]
+            reward_metrics["temporal_ordered_correct_shuffled_correct_ratio"] = [
+                temporal_group_counts["ordered_correct_shuffled_correct"] / total
+            ]
+            reward_metrics["temporal_ordered_wrong_shuffled_correct_ratio"] = [
+                temporal_group_counts["ordered_wrong_shuffled_correct"] / total
+            ]
+            reward_metrics["temporal_ordered_wrong_shuffled_wrong_ratio"] = [
+                temporal_group_counts["ordered_wrong_shuffled_wrong"] / total
+            ]
+            reward_metrics["temporal_ordered_gt_shuffled_ratio"] = [
+                temporal_group_counts["ordered_gt_shuffled"] / total
+            ]
+            reward_metrics["temporal_compare_pass_ratio"] = [temporal_group_counts["compare_pass"] / total]
         reward_metrics["length_bonus"] = length_bonus.tolist()
 
     def _make_batch_data(self, metrics: dict[str, Any]) -> DataProto:

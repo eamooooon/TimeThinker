@@ -12,7 +12,7 @@ dataset/
 Qwen/
 models/
 Evaluation/data/
-Evaluation/results/
+Evaluation/results*/
 
 # logs
 swanlog/

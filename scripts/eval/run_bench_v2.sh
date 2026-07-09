@@ -56,7 +56,7 @@ RUN_PARALLEL=${RUN_PARALLEL:-1}
 EVAL_GPUS=${EVAL_GPUS:-${CUDA_VISIBLE_DEVICES:-0,1,2,3}}
 EVAL_SCHEDULE=${EVAL_SCHEDULE:-balanced}  # balanced|listed
 PYTHON=${PYTHON:-$REPO_ROOT/.venv_eval/bin/python}
-EVAL_BENCH_SCRIPT=${EVAL_BENCH_SCRIPT:-Evaluation/Eval/eval_bench.py}
+EVAL_BENCH_SCRIPT=${EVAL_BENCH_SCRIPT:-Evaluation/Eval/eval_bench_v2.py}
 if [[ -z "${EVAL_BENCH_SUPPORTS_FRAME_CACHE:-}" ]]; then
   EVAL_BENCH_SUPPORTS_FRAME_CACHE=1
 fi

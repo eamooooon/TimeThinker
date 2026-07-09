@@ -70,7 +70,25 @@ def fmt(value: Any) -> str:
     return str(value)
 
 
-def summarize_dir(result_dir: Path, pattern: str) -> Dict[str, Any]:
+def fmt_duration(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "-"
+    total = int(round(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    return f"{minutes}m{secs:02d}s"
+
+
+def summarize_dir(
+    result_dir: Path,
+    pattern: str,
+    wall_start_epoch: Optional[float] = None,
+    wall_end_epoch: Optional[float] = None,
+    run_date_suffix: Optional[str] = None,
+    eval_schedule: Optional[str] = None,
+) -> Dict[str, Any]:
     files = sorted(p for p in result_dir.glob(pattern) if p.is_file())
     benchmarks: Dict[str, Dict[str, Any]] = {}
 
@@ -89,13 +107,46 @@ def summarize_dir(result_dir: Path, pattern: str) -> Dict[str, Any]:
         if isinstance(row.get("answer_acc"), (int, float))
     ]
     macro_acc = sum(accs) / len(accs) if accs else None
+    elapsed_seconds = [
+        row.get("elapsed_seconds")
+        for row in benchmarks.values()
+        if isinstance(row.get("elapsed_seconds"), (int, float))
+    ]
+    total_elapsed_seconds = sum(elapsed_seconds) if elapsed_seconds else None
+    total_samples = sum(
+        row.get("samples", 0)
+        for row in benchmarks.values()
+        if isinstance(row.get("samples"), int)
+    )
+
+    metrics = {
+        "macro_avg/by_benchmark": macro_acc,
+        "num_benchmarks": len(accs),
+        "total_samples": total_samples,
+        "benchmark_elapsed_seconds_sum": total_elapsed_seconds,
+        "benchmark_elapsed_min_sum": total_elapsed_seconds / 60.0 if total_elapsed_seconds is not None else None,
+    }
+    timing: Dict[str, Any] = {}
+    if wall_start_epoch is not None and wall_end_epoch is not None:
+        wall_seconds = max(0.0, wall_end_epoch - wall_start_epoch)
+        timing = {
+            "wall_start_epoch": wall_start_epoch,
+            "wall_end_epoch": wall_end_epoch,
+            "wall_time_seconds": wall_seconds,
+            "wall_time_min": wall_seconds / 60.0,
+            "wall_time_hms": fmt_duration(wall_seconds),
+        }
+        metrics["wall_time_seconds"] = wall_seconds
+        metrics["wall_time_min"] = wall_seconds / 60.0
+    if run_date_suffix:
+        timing["date_suffix"] = run_date_suffix
+    if eval_schedule:
+        timing["eval_schedule"] = eval_schedule
 
     return {
         "result_dir": str(result_dir),
-        "metrics": {
-            "macro_avg/by_benchmark": macro_acc,
-            "num_benchmarks": len(accs),
-        },
+        "metrics": metrics,
+        "timing": timing,
         "benchmarks": benchmarks,
     }
 
@@ -106,6 +157,14 @@ def to_markdown(summary: Dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"- macro_avg/by_benchmark: {fmt(summary['metrics']['macro_avg/by_benchmark'])}")
     lines.append(f"- num_benchmarks: {summary['metrics']['num_benchmarks']}")
+    lines.append(f"- total_samples: {summary['metrics'].get('total_samples', '-')}")
+    if isinstance(summary["metrics"].get("benchmark_elapsed_min_sum"), (int, float)):
+        lines.append(f"- benchmark_elapsed_min_sum: {fmt(summary['metrics']['benchmark_elapsed_min_sum'])}")
+    timing = summary.get("timing", {})
+    if isinstance(timing, dict) and isinstance(timing.get("wall_time_seconds"), (int, float)):
+        lines.append(f"- wall_time: {timing.get('wall_time_hms')} ({fmt(timing.get('wall_time_min'))} min)")
+        if timing.get("eval_schedule"):
+            lines.append(f"- eval_schedule: {timing.get('eval_schedule')}")
     lines.append("")
     lines.append(
         "| benchmark | samples | elapsed_min | cache_hit | cache_miss | cache_write | fallback_pyav | answer_acc | extract_rate | invalid_rate | trunc_rate | avg_tokens | category_macro | bootstrap_ci |"
@@ -149,11 +208,22 @@ def main() -> None:
     parser.add_argument("result_dirs", nargs="+", help="Result dirs such as Evaluation/results/MODEL/frames16")
     parser.add_argument("--pattern", default="eval_*.json", help="Glob pattern inside each result dir.")
     parser.add_argument("--no_write", action="store_true", help="Only print markdown; do not write summary files.")
+    parser.add_argument("--wall_start_epoch", type=float, default=None, help="Run wall-clock start epoch seconds.")
+    parser.add_argument("--wall_end_epoch", type=float, default=None, help="Run wall-clock end epoch seconds.")
+    parser.add_argument("--run_date_suffix", default=None, help="DATE_SUFFIX printed by run_bench.sh.")
+    parser.add_argument("--eval_schedule", default=None, help="Benchmark scheduling mode used by run_bench.sh.")
     args = parser.parse_args()
 
     for raw_dir in args.result_dirs:
         result_dir = Path(raw_dir)
-        summary = summarize_dir(result_dir, args.pattern)
+        summary = summarize_dir(
+            result_dir,
+            args.pattern,
+            wall_start_epoch=args.wall_start_epoch,
+            wall_end_epoch=args.wall_end_epoch,
+            run_date_suffix=args.run_date_suffix,
+            eval_schedule=args.eval_schedule,
+        )
         markdown = to_markdown(summary)
         print(markdown)
 

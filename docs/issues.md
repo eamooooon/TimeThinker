@@ -423,8 +423,8 @@ python -m verl.trainer.main config="${CONFIG}" "$@"
 - `gpu_memory_utilization: 0.7`
 - 标准配置保存路径当前仍写在 yaml 里：
   - `config/rl/qwen3_rl.yaml`: `models/TimeThinker-4B-RL-Zero-100-grpo`
-  - `config/rl/qwen3_rl_t.yaml`: `models/TimeThinker-4B-RL-Zero-100-tgrpo-ema`
-- 如果磁盘目录已经改名为 `van` / `van-v2` / `tgrpo-van`，需要同步检查 `config/rl/*.yaml` 和 `scripts/train/run_rl_list.sh`，否则新训练会继续写到旧目录名。
+  - `config/rl/qwen3_rl_t.yaml`: `models/TimeThinker-4B-RL-Zero-100-tgrpo-van2`
+- 如果磁盘目录已经改名为 `van` / `van-v2` / `tgrpo-van` / `tgrpo-van2`，需要同步检查 `config/rl/*.yaml` 和 `scripts/train/run_rl_list.sh`，否则新训练会继续写到旧目录名。
 
 **SwanLab**
 

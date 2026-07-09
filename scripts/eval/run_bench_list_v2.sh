@@ -6,7 +6,7 @@ cd "$REPO_ROOT"
 
 LOG_DIR=${LOG_DIR:-logs}
 LIST_LOG_DIR=${LIST_LOG_DIR:-$LOG_DIR}
-RUN_BENCH=${RUN_BENCH:-scripts/eval/run_bench.sh}
+RUN_BENCH=${RUN_BENCH:-scripts/eval/run_bench_v2.sh}
 CONTINUE_ON_ERROR=${CONTINUE_ON_ERROR:-0}
 
 mkdir -p "$LIST_LOG_DIR"

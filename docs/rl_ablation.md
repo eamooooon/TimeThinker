@@ -39,7 +39,7 @@ scripts/train/run_rl_t.sh
 scripts/train/run_rl_list.sh
 ```
 
-注意：当前磁盘模型目录已经使用 `van` / `ema` / `tgrpo-van` / `tgrpo-ema` 命名，但部分 yaml 和 list 脚本里仍可能保留旧的 `grpo` 字样。新实验开始前要先确认 `trainer.experiment_name` 和 `trainer.save_checkpoint_path`，避免结果写进旧目录。
+注意：当前磁盘模型目录已经使用 `van` / `ema` / `tgrpo-van` / `tgrpo-van2` 命名；真正的 `tgrpo-ema` 需要后续用 `adv_estimator=ema_grpo` 重跑。部分 yaml 和 list 脚本里仍可能保留旧的 `grpo` 字样。新实验开始前要先确认 `trainer.experiment_name` 和 `trainer.save_checkpoint_path`，避免结果写进旧目录。
 
 ## 命名约定
 
@@ -48,6 +48,7 @@ scripts/train/run_rl_list.sh
 | `van` | vanilla GRPO | `algorithm.adv_estimator=grpo` |
 | `ema` | EMA-GRPO | `algorithm.adv_estimator=ema_grpo` |
 | `tgrpo-van` | T-GRPO + vanilla GRPO advantage | `temporal=true`, `adv_estimator=grpo` |
+| `tgrpo-van2` | 第二个 T-GRPO + vanilla GRPO run | `temporal=true`, `adv_estimator=grpo` |
 | `tgrpo-ema` | T-GRPO + EMA-GRPO advantage | `temporal=true`, `adv_estimator=ema_grpo` |
 | `v2` | 第二轮同类实验 | 需要在备注里写清楚和第一轮差异 |
 
@@ -114,17 +115,29 @@ models/TimeThinker-4B-RL-Zero-100-<variant>-v2
   - LongVideoReason、VideoMathQA、VideoMMMU 拉低平均。
   - temporal reward 只应该重点看时间顺序/视频推理类指标，不要用 OCR、数学、空间类下降直接否定 T-GRPO。
 
+### RL Zero 100 tgrpo-van2
+
+- 模型目录：`models/TimeThinker-4B-RL-Zero-100-tgrpo-van2`
+- 主要变量：
+  - `algorithm.temporal=true`
+  - `algorithm.adv_estimator=grpo`
+- 状态：已有新一轮评测结果。该结果原先误记为 `tgrpo-ema`，现已更正为 `tgrpo-van2`。
+- 当前观察：
+  - 8 项平均约 `56.08%`。
+  - 比 `tgrpo-van` 更稳，但不能作为 T-GRPO + EMA 结论。
+  - 和 `tgrpo-van` 的差异主要应视为同类 T-GRPO + GRPO run 的随机轨迹/输出分布差异。
+
 ### RL Zero 100 tgrpo-ema
 
-- 模型目录：`models/TimeThinker-4B-RL-Zero-100-tgrpo-ema`
+- 模型目录：待定，建议使用 `models/TimeThinker-4B-RL-Zero-100-tgrpo-ema`
 - 主要变量：
   - `algorithm.temporal=true`
   - `algorithm.adv_estimator=ema_grpo`
-- 状态：目录存在，待补统一评测记录。
+- 状态：待重跑严格版本。
 - 当前待确认：
-  - 是否已完成 `global_step_100/actor/huggingface` 转换。
-  - 是否已用新 eval prompt 跑完整 benchmark。
-  - 和 `tgrpo-van` 的差异是否只来自 advantage estimator。
+  - 配置和保存目录必须同时指向 `tgrpo-ema`。
+  - `experiment_config.json` 中必须是 `adv_estimator=ema_grpo`。
+  - 评测结果不能复用 `tgrpo-van2`。
 
 ## 消融维度
 
@@ -359,7 +372,8 @@ Evaluation/results/<model_tag>/frames<MAX_FRAMES>/_summary.json
 | `TimeThinker-4B-RL-Zero-100-ema-v2` | EMA-GRPO | 100 | 56.08 | 67.50 | 60.80 | 65.12 | 72.81 | 19.05 | 51.22 | - | - | new run |
 | `TimeThinker-4B-RL-Zero-100-van-v2` | GRPO | 100 | 55.26 | 66.50 | 60.15 | 64.32 | 72.76 | 17.38 | 50.44 | - | - | new run |
 | `TimeThinker-4B-RL-Zero-100-tgrpo-van` | T-GRPO + GRPO | 100 | 55.37 | 64.50 | 60.65 | 66.56 | 73.09 | 17.62 | 49.78 | - | - | new run |
-| `TimeThinker-4B-RL-Zero-100-tgrpo-ema` | T-GRPO + EMA | 100 | | | | | | | | | | pending |
+| `TimeThinker-4B-RL-Zero-100-tgrpo-van2` | T-GRPO + GRPO | 100 | 56.08 | 69.50 | 52.11 | 62.98 | 72.18 | 22.62 | 67.36 | 55.48 | 46.38 | was mislabeled as tgrpo-ema |
+| `TimeThinker-4B-RL-Zero-100-tgrpo-ema` | T-GRPO + EMA | 100 | | | | | | | | | | pending strict rerun |
 
 ### 训练稳定性表
 
@@ -381,12 +395,361 @@ Evaluation/results/<model_tag>/frames<MAX_FRAMES>/_summary.json
 - VideoMathQA 普遍偏低，是 RL 后训练和评测都需要重点排查的短板。
 - LongVideoReason、VideoMMMU 很慢，快速验证时建议先小样本跑；完整结论再跑全集。
 
+## 待验证实验计划
+
+这一轮实验要避免只看总平均分。每个实验都需要同时记录训练配置、reward 曲线、response length、invalid/truncation、per-benchmark 和 per-category 结果。
+
+### 1. 对比实验
+
+#### 1.1 EMA 和 Value/Critic 对比
+
+目标：确认 advantage estimator 本身的收益，而不是被 temporal reward、batch size 或 prompt 差异混淆。
+
+建议对比：
+
+| 实验 | adv_estimator | temporal | 目的 |
+|---|---|---:|---|
+| GRPO | `grpo` | false | 当前 vanilla baseline |
+| EMA-GRPO | `ema_grpo` | false | 验证 EMA 是否更稳 |
+| Value/Critic | `gae` 或当前框架对应 value estimator | false | 验证 critic/value baseline 是否优于无 critic |
+
+控制变量：
+
+- 同一 base model。
+- 同一 train/val 数据。
+- 同一 `max_steps`。
+- 同一 `rollout_batch_size` / `global_batch_size`。
+- 同一 `max_response_length`。
+- 同一 eval prompt 和 benchmark 列表。
+
+重点看：
+
+- `reward/accuracy`
+- `reward/format`
+- KL 曲线
+- response length 漂移
+- `invalid_answer_rate`
+- `truncation_rate`
+- eval 的 bootstrap CI
+
+#### 1.2 T-GRPO 和普通 GRPO 对比
+
+目标：确认 temporal reward 是否真的带来时序理解收益。
+
+建议对比：
+
+| 实验 | adv_estimator | temporal | 目的 |
+|---|---|---:|---|
+| GRPO | `grpo` | false | 普通 baseline |
+| T-GRPO | `grpo` | true | 验证 temporal reward |
+| EMA-GRPO | `ema_grpo` | false | EMA baseline |
+| T-GRPO + EMA | `ema_grpo` | true | 验证 temporal + EMA 是否叠加 |
+
+注意：原先的 `tgrpo-ema` 结果已经更名为 `tgrpo-van2`，因为其 `experiment_config.json` 中实际是 `adv_estimator=grpo`。后续真正的 `tgrpo-ema` 必须重跑并确认 `adv_estimator=ema_grpo`。
+
+### 2. T-GRPO 效果分析与优化
+
+#### 2.1 排查 T-GRPO 为什么更差
+
+需要补充数据分布统计：
+
+- ordered video accuracy。
+- shuffled video accuracy。
+- ordered 正确、shuffled 错误的比例。
+- ordered 和 shuffled 都正确的比例。
+- ordered 和 shuffled 都错误的比例。
+- `temporal_bonus` 触发比例。
+- 触发 bonus 的样本类型分布。
+- 触发 bonus 后 response length 是否变长。
+- 触发 bonus 的样本在 eval temporal 子类上是否真的收益更高。
+
+重点排查：
+
+- `temporal_compare_ratio=0.8` 是否过松，导致 shuffled 也能答对的样本被奖励。
+- `temporal_reward=0.3` 是否过大，压过原始 accuracy reward。
+- T-GRPO 是否提高了 temporal 子类，但损伤 VideoMathQA、VideoMMMU、OCR、空间推理等非 temporal 项。
+- 是否出现更高 `invalid_answer_rate` 或 `truncation_rate`。
+
+#### 2.2 T-GRPO 超参数实验
+
+建议先小网格，不要一次扫太大。
+
+| 参数 | 当前值 | 候选值 | 目的 |
+|---|---:|---|---|
+| `temporal_reward` | 0.3 | `0.05 / 0.1 / 0.2 / 0.3` | 判断 temporal bonus 是否过强 |
+| `temporal_compare_ratio` | 0.8 | `0.8 / 1.0 / 1.2` | 提高 ordered 必须优于 shuffled 的门槛 |
+| `temporal_correct_threshold` | 0.1 | `0.1 / 0.3 / 0.5` | 避免弱正确样本拿 bonus |
+| `shuffled_rollout_ratio` | 0.5 | `0.25 / 0.5 / 1.0` | 判断 shuffled 对比样本数是否足够 |
+
+优先级：
+
+1. `temporal_reward=0.1`
+2. `temporal_compare_ratio=1.0`
+3. `temporal_reward=0.1 + temporal_compare_ratio=1.0`
+4. `shuffled_rollout_ratio=1.0`
+
+#### 2.3 长度奖励设计
+
+当前没有启用长度奖励：
+
+```yaml
+len_control: false
+```
+
+设计长度奖励前，先统计 response length 和 accuracy 的关系。
+
+建议分桶：
+
+| Length bucket | 需要统计 |
+|---|---|
+| `0-64` | accuracy / format / invalid |
+| `64-128` | accuracy / format / invalid |
+| `128-256` | accuracy / format / invalid |
+| `256-384` | accuracy / format / invalid |
+| `384-512` | accuracy / format / invalid |
+| `512-768` | accuracy / format / truncation |
+
+如果发现正确率最高区间集中在某个范围，再启用：
+
+```yaml
+len_control: true
+len_min: <best_lower>
+len_max: <best_upper>
+len_reward: 0.05
+```
+
+长度奖励建议从 `0.05` 或 `0.1` 开始，不建议直接用 `0.2`，避免模型为了拿长度奖励硬凑 token。
+
+### 3. 模型训练与配置
+
+#### 3.1 Batch size
+
+需要验证 batch size 对 reward 方差和最终 eval 的影响。
+
+| 实验 | rollout_batch_size | global_batch_size | 目的 |
+|---|---:|---:|---|
+| bs16 | 16 | 16 | 当前小 batch 配置 |
+| bs32 | 32 | 32 | 当前 T-GRPO 配置 |
+| bs64 | 64 | 64 | 如果资源允许，验证稳定性 |
+
+重点看：
+
+- 每 step reward 方差。
+- online filtering 后实际有效 batch。
+- response length 是否更稳定。
+- eval bootstrap CI 是否变窄。
+
+#### 3.2 Step 数
+
+只看 step100 不够，需要看训练是否还在上升或已经过拟合。
+
+建议保存并评估：
+
+| Step | 目的 |
+|---:|---|
+| 50 | 早期 checkpoint |
+| 100 | 当前默认 |
+| 200 | 看是否继续提升 |
+| 400 | 看是否过拟合或分布漂移 |
+
+评估时同一个 run 要比较不同 checkpoint，避免不同 seed/run 的方差干扰。
+
+#### 3.3 图像 pixel
+
+当前配置：
+
+```yaml
+max_pixels: 100352
+```
+
+建议对比：
+
+| 实验 | max_pixels | 目的 |
+|---|---:|---|
+| low-res | 50176 | 降低成本，检查是否明显掉分 |
+| baseline | 100352 | 当前默认 |
+| high-res | 200704 | 看视觉细节类 benchmark 是否提升 |
+
+重点看：
+
+- 显存占用。
+- 训练吞吐。
+- VideoMME / MVBench / VSIBench 是否提升。
+- 长视频任务是否因为 pixel 增加导致吞吐明显下降。
+
+#### 3.4 Max response length
+
+当前：
+
+```yaml
+max_response_length: 768
+```
+
+建议对比：
+
+| 实验 | max_response_length | 目的 |
+|---|---:|---|
+| short | 512 | 降低截断前的生成成本，约束输出 |
+| baseline | 768 | 当前默认 |
+| long | 1024 | 验证 VideoMathQA / VideoMMMU 是否受截断影响 |
+
+如果 `1024` 提升 VideoMathQA 但输出变长、耗时变高，需要配合 length reward 或更强 KL。
+
+#### 3.5 Vision Tower / Projector 冻结策略
+
+目标：确认 RL 阶段是否需要继续训练视觉模块。SFT 阶段的结论不能完全直接迁移到 RL，因为 RL reward 更稀疏、更 noisy，更容易造成视觉表征或视觉-语言对齐漂移。
+
+当前 RL 配置：
+
+```yaml
+worker:
+  actor:
+    model:
+      freeze_vision_tower: false
+```
+
+当前代码只支持 `freeze_vision_tower`，没有单独的 `freeze_multi_modal_projector` 开关。因此：
+
+| 配置 | Vision Tower | Projector / Merger | LLM |
+|---|---|---|---|
+| `freeze_vision_tower: false` | train | train | train |
+| `freeze_vision_tower: true` | freeze | train | train |
+
+推荐默认先试：
+
+```yaml
+freeze_vision_tower: true
+```
+
+原因：
+
+- Vision Tower 参数量大，RL reward 噪声可能破坏底层视觉表征。
+- Projector / Merger 是视觉特征到 LLM hidden states 的适配层，参数更小，保留可训练通常更稳。
+- 只冻结 Vision Tower 仍允许模型调整视觉信息进入语言模型的方式，比只训 LLM 更灵活。
+
+建议实验：
+
+| 实验 | Vision Tower | Projector / Merger | LLM | 目的 |
+|---|---|---|---|---|
+| train-all | train | train | train | 当前配置，对照组 |
+| freeze-vision | freeze | train | train | 推荐优先验证 |
+| llm-only | freeze | freeze | train | 判断 projector 是否也被 RL reward 带偏 |
+
+注意：`llm-only` 当前需要新增代码支持单独冻结 projector / merger，不能只靠现有 yaml 完成。
+
+重点看：
+
+- `answer_acc`
+- `format`
+- `avg_output_tokens`
+- `invalid_answer_rate`
+- `truncation_rate`
+- VideoMME / MVBench / VSIBench 等视觉相关 benchmark
+- TempCompass / LongVideoReason 等时序相关 benchmark
+
+如果 `freeze-vision` 比 `train-all` 更稳或分数更高，则后续 RL 默认冻结 Vision Tower。只有在高分辨率、长视频或视觉细节类任务明显受限时，再考虑继续训练 Vision Tower。
+
+### 4. KL 超参数
+
+当前配置存在两个容易混淆的字段：
+
+```yaml
+disable_kl: true
+use_kl_loss: true
+kl_penalty: low_var_kl
+kl_coef: 4.0e-2
+```
+
+需要先确认代码里：
+
+- `disable_kl` 是否只关闭 reward-level KL。
+- `use_kl_loss` 是否仍然启用 actor loss 中的 KL。
+- 实际训练日志中 KL 是否有非零记录。
+
+建议实验：
+
+| 实验 | kl_coef | kl_penalty | 目的 |
+|---|---:|---|---|
+| no-kl | 0.0 | `low_var_kl` | 看无 KL 是否漂移严重 |
+| low-kl | 1e-2 | `low_var_kl` | 放松约束 |
+| baseline | 4e-2 | `low_var_kl` | 当前默认 |
+| high-kl | 8e-2 | `low_var_kl` | 更保守 |
+| very-high-kl | 1e-1 | `low_var_kl` | 强约束，观察是否保住格式和长度 |
+
+如果框架支持，也可以对比：
+
+| 实验 | kl_type | 目的 |
+|---|---|---|
+| fixed | `fixed` | 当前固定 KL |
+| adaptive | `adaptive` | 根据目标 KL 自动调整 |
+
+重点看：
+
+- KL 曲线是否飙升。
+- answer accuracy 是否提升。
+- format 是否下降。
+- avg output tokens 是否漂移。
+- invalid/truncation 是否升高。
+
+### 5. 额外必须补的控制项
+
+#### 5.1 Seed variance
+
+当前 0.5 到 1 分的差距可能落在随机方差内。关键对比至少跑：
+
+```text
+seed=1
+seed=2
+seed=3
+```
+
+如果资源不够，至少对最关键的 `GRPO`、`EMA-GRPO`、`T-GRPO` 跑 2 个 seed。
+
+#### 5.2 Checkpoint selection
+
+不要只评估最后一步。每个 run 至少记录：
+
+```text
+global_step_50
+global_step_100
+global_step_200
+```
+
+已有日志显示最后一步 batch 波动可能影响结论，所以 checkpoint selection 很重要。
+
+#### 5.3 Per-category eval
+
+T-GRPO 不能只看总平均，要重点看：
+
+- VideoMME `Temporal Perception`
+- VideoMME `Temporal Reasoning`
+- TempCompass `order`
+- TempCompass `speed`
+- TempCompass `direction`
+- LongVideoReason
+- MVBench temporal 子类
+
+#### 5.4 Answer extraction / invalid rate
+
+每次 eval 都要记录：
+
+- `answer_extract_rate`
+- `invalid_answer_rate`
+- `avg_output_tokens`
+- `truncation_rate`
+- `bootstrap_ci`
+
+如果模型总分下降但 invalid/truncation 上升，需要先判断是不是输出格式/长度问题，而不是能力问题。
+
 ## 下一步
 
 1. 先把 `config/rl/*.yaml` 和 `scripts/train/run_rl_list.sh` 的旧 `grpo` 命名同步到 `van` 规则，避免后续新实验写错目录。
-2. 补 `tgrpo-ema` 的转换和统一评测。
-3. 重新用新 prompt 复测旧 `ema` / `van`，确认旧高分是否真实。
-4. 做 `van-v2` vs `ema-v2` 的同 prompt、同 benchmark、同 suffix 对比，优先看 `_summary.md`。
-5. 对 T-GRPO 增加 temporal reward 触发率统计，否则很难解释 temporal 实验为什么涨或不涨。
-6. 如果训练资源紧张，优先做 `MAX_SAMPLES=800` 快速验证，再对最有希望的 1-2 个模型跑完整评测。
-7. 每个 RL 结果目录保存实际训练配置，例如 `train_config.yaml`，不要依赖当前 yaml 反推历史实验。
+2. 重跑严格的 `tgrpo-ema`，确认 `experiment_config.json` 中使用 `adv_estimator=ema_grpo`。
+3. 补 response length 与 accuracy 的分桶统计，再决定是否启用 length reward。
+4. 增加 temporal reward 触发率、ordered/shuffled accuracy 对比统计，否则很难解释 temporal 实验为什么涨或不涨。
+5. 优先跑小规模 T-GRPO 超参：`temporal_reward=0.1`、`temporal_compare_ratio=1.0`、两者组合。
+6. 做 KL ablation：`kl_coef=1e-2 / 4e-2 / 8e-2`。
+7. 做 step ablation：评估 `global_step_50 / 100 / 200`。
+8. 重新用新 prompt 复测旧 `ema` / `van`，确认旧高分是否真实。
+9. 如果训练资源紧张，优先做 `MAX_SAMPLES=800` 快速验证，再对最有希望的 1-2 个模型跑完整评测。
+10. 每个 RL 结果目录保存实际训练配置，例如 `train_config.yaml`，不要依赖当前 yaml 反推历史实验。

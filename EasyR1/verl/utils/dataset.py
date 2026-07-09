@@ -17,8 +17,11 @@
 import math
 import os
 import json
+import hashlib
+import shutil
 from collections import defaultdict
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Optional, Union
 
 import numpy as np
@@ -34,6 +37,10 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from . import torch_functional as VF
 
+
+RL_FRAME_CACHE_VERSION = 1
+RL_FRAME_CACHE_IMAGE_EXT = "jpg"
+RL_FRAME_CACHE_JPEG_QUALITY = 95
 
 QUESTION_TEMPLATE = (
     "{Question}\n"
@@ -163,11 +170,294 @@ def _fetch_video_with_pyav(
     )
 
 
+def _clean_video_path(video_path: str) -> str:
+    if isinstance(video_path, str) and video_path.startswith("file://"):
+        return video_path[len("file://") :]
+    return video_path
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _rl_frame_cache_root() -> Optional[Path]:
+    if _truthy_env("RL_FRAME_CACHE_DISABLE"):
+        return None
+
+    cache_dir = os.environ.get("RL_FRAME_CACHE_DIR")
+    if not cache_dir:
+        return None
+    return Path(cache_dir)
+
+
+def _frame_cache_key(
+    video_path: str,
+    min_pixels: Optional[int],
+    max_pixels: Optional[int],
+    max_frames: int,
+    video_fps: float,
+) -> tuple[str, dict[str, Any]]:
+    clean_path = _clean_video_path(video_path)
+    abs_path = os.path.abspath(clean_path)
+    try:
+        stat = os.stat(clean_path)
+        source = {
+            "path": abs_path,
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+    except Exception:
+        source = {
+            "path": abs_path,
+            "size": None,
+            "mtime_ns": None,
+        }
+
+    key_data = {
+        "version": RL_FRAME_CACHE_VERSION,
+        "source": source,
+        "min_pixels": None if min_pixels is None else int(min_pixels),
+        "max_pixels": None if max_pixels is None else int(max_pixels),
+        "max_frames": int(max_frames),
+        "fps": float(video_fps),
+        "image_ext": RL_FRAME_CACHE_IMAGE_EXT,
+        "jpeg_quality": RL_FRAME_CACHE_JPEG_QUALITY,
+    }
+    digest = hashlib.sha256(json.dumps(key_data, sort_keys=True).encode("utf-8")).hexdigest()
+    return digest, key_data
+
+
+def _frame_cache_dir_for(cache_root: Path, key: str) -> Path:
+    return cache_root / key[:2] / key
+
+
+def _load_frame_cache(cache_root: Optional[Path], key: str) -> Optional[tuple[list[ImageObject], dict[str, Any]]]:
+    if cache_root is None:
+        return None
+
+    cache_dir = _frame_cache_dir_for(cache_root, key)
+    meta_path = cache_dir / "metadata.json"
+    if not meta_path.exists():
+        return None
+
+    try:
+        with meta_path.open("r", encoding="utf-8") as f:
+            meta = json.load(f)
+
+        frame_names = meta.get("frames", [])
+        if not isinstance(frame_names, list) or not frame_names:
+            return None
+
+        frames = []
+        for name in frame_names:
+            frame_path = cache_dir / str(name)
+            if not frame_path.exists():
+                return None
+            with Image.open(frame_path) as image:
+                frames.append(image.convert("RGB").copy())
+
+        if len(frames) == 1:
+            frames.append(frames[0].copy())
+        return frames, meta
+    except Exception:
+        return None
+
+
+def _save_frame_cache(
+    cache_root: Optional[Path],
+    key: str,
+    key_data: dict[str, Any],
+    frames: list[ImageObject],
+    raw_fps: float,
+    sample_fps: float,
+) -> bool:
+    if cache_root is None or not frames:
+        return False
+
+    cache_dir = _frame_cache_dir_for(cache_root, key)
+    meta_path = cache_dir / "metadata.json"
+    if meta_path.exists():
+        return False
+
+    parent = cache_dir.parent
+    tmp_dir = parent / f".{key}.{os.getpid()}.tmp"
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        tmp_dir.mkdir(parents=True)
+
+        frame_names = []
+        for idx, frame in enumerate(frames):
+            name = f"{idx:04d}.{RL_FRAME_CACHE_IMAGE_EXT}"
+            frame_names.append(name)
+            frame.convert("RGB").save(
+                tmp_dir / name,
+                format="JPEG",
+                quality=RL_FRAME_CACHE_JPEG_QUALITY,
+                optimize=False,
+            )
+
+        with (tmp_dir / "metadata.json").open("w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "key": key,
+                    "key_data": key_data,
+                    "frames": frame_names,
+                    "num_frames": len(frame_names),
+                    "raw_fps": float(raw_fps),
+                    "sample_fps": float(sample_fps),
+                },
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
+
+        if cache_dir.exists() and not meta_path.exists():
+            shutil.rmtree(cache_dir)
+        tmp_dir.rename(cache_dir)
+        return True
+    except FileExistsError:
+        return False
+    except Exception as exc:
+        print(f"[RLFrameCache] failed to save {cache_dir}: {exc}")
+        return False
+    finally:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _sample_video_frames_decord(vision_info: dict[str, Any]) -> tuple[list[ImageObject], float, float]:
+    from decord import VideoReader, cpu
+    from qwen_vl_utils.vision_process import smart_nframes
+
+    video_path = _clean_video_path(vision_info["video"])
+    vr = VideoReader(video_path, ctx=cpu(0))
+    total_frames = len(vr)
+    if total_frames == 0:
+        raise RuntimeError(f"No frames decoded from video: {video_path}")
+
+    raw_fps = float(vr.get_avg_fps() or 24.0)
+    nframes = smart_nframes(vision_info, total_frames=total_frames, video_fps=raw_fps)
+    indices = np.linspace(0, total_frames - 1, nframes).round().astype(int).tolist()
+    batch = vr.get_batch(indices).asnumpy()
+    frames = [Image.fromarray(frame).convert("RGB") for frame in batch]
+    if len(frames) == 1:
+        frames.append(frames[0].copy())
+
+    sample_fps = nframes / max(total_frames, 1e-6) * raw_fps
+    return frames, raw_fps, sample_fps
+
+
+def _sample_video_frames_pyav(vision_info: dict[str, Any]) -> tuple[list[ImageObject], float, float]:
+    import av
+    from qwen_vl_utils.vision_process import smart_nframes
+
+    video_path = _clean_video_path(vision_info["video"])
+    decoded_frames = []
+    with av.open(video_path) as container:
+        stream = container.streams.video[0]
+        raw_fps = float(stream.average_rate) if stream.average_rate else 24.0
+        for frame in container.decode(stream):
+            decoded_frames.append(frame.to_image().convert("RGB"))
+
+    if len(decoded_frames) == 0:
+        raise RuntimeError(f"No frames decoded from video: {video_path}")
+
+    nframes = smart_nframes(vision_info, total_frames=len(decoded_frames), video_fps=raw_fps)
+    indices = np.linspace(0, len(decoded_frames) - 1, nframes).round().astype(int).tolist()
+    frames = [decoded_frames[i] for i in indices]
+    if len(frames) == 1:
+        frames.append(frames[0].copy())
+
+    sample_fps = nframes / max(len(decoded_frames), 1e-6) * raw_fps
+    return frames, raw_fps, sample_fps
+
+
+def _sample_video_frames_for_cache(vision_info: dict[str, Any]) -> tuple[list[ImageObject], float, float]:
+    backend = os.environ.get("FORCE_QWENVL_VIDEO_READER", "decord").strip().lower()
+    if backend != "pyav":
+        try:
+            return _sample_video_frames_decord(vision_info)
+        except Exception as exc:
+            if _truthy_env("RL_FRAME_CACHE_VERBOSE"):
+                print(f"[RLFrameCache] decord failed for {vision_info['video']}, falling back to pyav: {exc}")
+
+    return _sample_video_frames_pyav(vision_info)
+
+
+def _fetch_video_from_frames(
+    frames: list[ImageObject],
+    vision_info: dict[str, Any],
+    raw_fps: float,
+    sample_fps: float,
+    image_patch_size: int = 16,
+    return_fps: bool = False,
+):
+    cached_info = dict(vision_info)
+    cached_info["video"] = frames
+    cached_info["sample_fps"] = sample_fps
+    cached_info["raw_fps"] = raw_fps
+    return fetch_video(
+        cached_info,
+        image_patch_size=image_patch_size,
+        return_video_sample_fps=return_fps,
+        return_video_metadata=return_fps,
+    )
+
+
+def _fetch_video_with_frame_cache(
+    vision_info: dict[str, Any], image_patch_size: int = 16, return_fps: bool = False
+):
+    cache_root = _rl_frame_cache_root()
+    key, key_data = _frame_cache_key(
+        vision_info["video"],
+        vision_info.get("min_pixels"),
+        vision_info.get("max_pixels"),
+        vision_info.get("max_frames", 128),
+        vision_info.get("fps", 2.0),
+    )
+
+    cached = _load_frame_cache(cache_root, key)
+    if cached is not None:
+        frames, meta = cached
+        if _truthy_env("RL_FRAME_CACHE_VERBOSE"):
+            print(f"[RLFrameCache] hit {vision_info['video']}")
+        return _fetch_video_from_frames(
+            frames,
+            vision_info,
+            raw_fps=float(meta.get("raw_fps") or vision_info.get("fps", 2.0)),
+            sample_fps=float(meta.get("sample_fps") or vision_info.get("fps", 2.0)),
+            image_patch_size=image_patch_size,
+            return_fps=return_fps,
+        )
+
+    frames, raw_fps, sample_fps = _sample_video_frames_for_cache(vision_info)
+    _save_frame_cache(cache_root, key, key_data, frames, raw_fps=raw_fps, sample_fps=sample_fps)
+    if _truthy_env("RL_FRAME_CACHE_VERBOSE"):
+        print(f"[RLFrameCache] miss {vision_info['video']}")
+    return _fetch_video_from_frames(
+        frames,
+        vision_info,
+        raw_fps=raw_fps,
+        sample_fps=sample_fps,
+        image_patch_size=image_patch_size,
+        return_fps=return_fps,
+    )
+
+
 def process_video(
     video: str, min_pixels: int = 4*32*32, max_pixels: int = 64*32*32, max_frames: int = 128, video_fps: float = 2, return_fps: bool = False
 ):
     vision_info = {"video": video, "min_pixels": min_pixels, "max_pixels": max_pixels, "max_frames": max_frames, "fps": video_fps}
     try:
+        if _rl_frame_cache_root() is not None:
+            return _fetch_video_with_frame_cache(
+                vision_info,
+                image_patch_size=16,
+                return_fps=return_fps,
+            )
+
         return fetch_video(
             vision_info,
             image_patch_size=16,
@@ -376,7 +666,14 @@ class RLHFDataset(Dataset):
 
             processed_videos = [] if len(videos) != 0 else None  # text-only data
             for video in videos:
-                processed_videos.append(process_video(video))
+                processed_videos.append(
+                    process_video(
+                        video,
+                        min_pixels=self.min_pixels,
+                        max_pixels=self.max_pixels,
+                        video_fps=self.video_fps,
+                    )
+                )
 
             model_inputs = self.processor(
                 videos=processed_videos, text=[prompt], add_special_tokens=False, return_tensors="pt"
@@ -421,7 +718,11 @@ class RLHFDataset(Dataset):
             video_fps_list = []
             for video in videos:
                 processed_video, video_fps = process_video(
-                    video, return_fps=True
+                    video,
+                    min_pixels=self.min_pixels,
+                    max_pixels=self.max_pixels,
+                    video_fps=self.video_fps,
+                    return_fps=True,
                 )
                 video_kwargs = {"do_sample_frames": False}
                 processed_videos.append(processed_video)

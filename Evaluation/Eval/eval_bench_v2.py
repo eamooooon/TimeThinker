@@ -94,15 +94,19 @@ FRAME_CACHE_IMAGE_EXT = "jpg"
 FRAME_CACHE_JPEG_QUALITY = 95
 
 # =========================
-# PROMPT
+# PROMPT (keep exactly as provided)
 # =========================
 QUESTION_TEMPLATE = (
     "{Question}\n"
-    "Please answer this question based on the visual content. "
-    "Provide your thinking process between the <think> and </think> tags, "
-    "and then give your final answer between the <answer> and </answer> tags. "
-    "At the end, you must output the final answer in the format:\n"
-    "<answer><your_answer_here></answer>\n"
+    "Please answer this question based on the visual content.\n"
+    "Your entire response must follow exactly this structure:\n"
+    "<think>\n"
+    "Your reasoning here.\n"
+    "</think>\n"
+    "<answer>\n"
+    "Your final answer here.\n"
+    "</answer>\n"
+    "Do not write anything before <think> or after </answer>.\n"
 )
 
 TYPE_TEMPLATE = {

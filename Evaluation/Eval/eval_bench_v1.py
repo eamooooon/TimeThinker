@@ -6,32 +6,16 @@ import re
 import json
 import math
 import argparse
-import random
 import hashlib
 import shutil
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
 
+import torch
 from tqdm import tqdm
-try:
-    import torch
-except Exception:
-    torch = None
-try:
-    from rouge_score import rouge_scorer
-except Exception:
-    rouge_scorer = None
-try:
-    import av
-except Exception:
-    av = None
-try:
-    if av is not None:
-        av.logging.set_level(av.logging.PANIC)
-except Exception:
-    pass
+from rouge_score import rouge_scorer
+import av
 from PIL import Image
 try:
     import cv2
@@ -42,22 +26,12 @@ try:
 except Exception:
     VideoReader = cpu = None
 
-try:
-    from transformers import AutoProcessor
-except Exception:
-    AutoProcessor = None
-try:
-    from vllm import LLM, SamplingParams
-except Exception:
-    LLM = SamplingParams = None
-try:
-    from qwen_vl_utils import process_vision_info
-except Exception:
-    process_vision_info = None
+from transformers import AutoProcessor
+from vllm import LLM, SamplingParams
+from qwen_vl_utils import process_vision_info
 
-if torch is not None:
-    torch.set_num_threads(int(os.environ.get("EVAL_TORCH_NUM_THREADS", os.environ.get("OMP_NUM_THREADS", "8"))))
-    torch.set_num_interop_threads(int(os.environ.get("EVAL_TORCH_INTEROP_THREADS", "1")))
+torch.set_num_threads(int(os.environ.get("EVAL_TORCH_NUM_THREADS", os.environ.get("OMP_NUM_THREADS", "8"))))
+torch.set_num_interop_threads(int(os.environ.get("EVAL_TORCH_INTEROP_THREADS", "1")))
 if cv2 is not None:
     cv2.setNumThreads(int(os.environ.get("OPENCV_NUM_THREADS", "1")))
 
@@ -94,47 +68,45 @@ FRAME_CACHE_IMAGE_EXT = "jpg"
 FRAME_CACHE_JPEG_QUALITY = 95
 
 # =========================
-# PROMPT
+# PROMPT (keep exactly as provided)
 # =========================
 QUESTION_TEMPLATE = (
     "{Question}\n"
-    "Please answer this question based on the visual content. "
-    "Provide your thinking process between the <think> and </think> tags, "
-    "and then give your final answer between the <answer> and </answer> tags. "
+    "Please answer this question based on the visual content."
+    "Provide your thinking process between the <think> and </think> tags, and then give your final answer between the <answer> and </answer> tags."
     "At the end, you must output the final answer in the format:\n"
     "<answer><your_answer_here></answer>\n"
 )
 
 TYPE_TEMPLATE = {
     "multiple choice": (
-        "The final answer inside <answer> must be only the single option letter "
-        "(e.g., A, B, C, D, etc.).\n"
-        "Example:\n<think>The correct option is A.</think>\n<answer>A</answer>"
+        "Please provide only the single option letter (e.g., A, B, C, D, etc.) "
+        "within the <answer>...</answer> tags.\n"
+        "Example:\n<answer>A</answer>"
     ),
     "numerical": (
-        "The final answer inside <answer> must be only the numerical value.\n"
-        "Example:\n<think>Compute the requested value.</think>\n<answer>3.14</answer>"
+        "Please provide only the numerical value within the <answer>...</answer> tags.\n"
+        "Example:\n<answer>3.14</answer>"
     ),
     "OCR": (
-        "The final answer inside <answer> must be only the transcribed text.\n"
-        "Example:\n<think>Read the visible text.</think>\n<answer>Hello World</answer>"
+        "Please provide only the transcribed text within the <answer>...</answer> tags.\n"
+        "Example:\n<answer>Hello World</answer>"
     ),
     "open-ended": (
-        "The final answer inside <answer> must be only your concise text answer.\n"
-        "Example:\n<think>Identify the requested fact.</think>\n<answer>The capital of France is Paris.</answer>"
+        "Please provide only your text answer within the <answer>...</answer> tags.\n"
+        "Example:\n<answer>The capital of France is Paris.</answer>"
     ),
     "free-form": (
-        "The final answer inside <answer> must be only your concise text answer.\n"
-        "Example:\n<think>Identify the requested fact.</think>\n<answer>The capital of France is Paris.</answer>"
+        "Please provide only your text answer within the <answer>...</answer> tags.\n"
+        "Example:\n<answer>The capital of France is Paris.</answer>"
     ),
     "regression": (
-        "The final answer inside <answer> must be only the numerical value.\n"
-        "Example:\n<think>Estimate the target value.</think>\n<answer>42.7</answer>"
+        "Please provide only the numerical value within the <answer>...</answer> tags.\n"
+        "Example:\n<answer>42.7</answer>"
     ),
     "math": (
-        "The final answer inside <answer> must be only the final result "
-        "(a number or LaTeX formula).\n"
-        "Example:\n<think>Solve the expression.</think>\n<answer>$$-\\dfrac{3}{2}$$</answer>"
+        "Please provide only the final result (a number or LaTeX formula) within the <answer>...</answer> tags.\n"
+        "Example:\n<answer>$$-\\dfrac{3}{2}$$</answer>"
     )
 }
 
@@ -142,110 +114,12 @@ TYPE_TEMPLATE = {
 # Utility functions (parsing and metrics)
 # =========================
 ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL)
-NUMBER_RE = re.compile(r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
-
-STRICT_THINK_ANSWER_RE = re.compile(
-    r"\A\s*<think>.*?</think>\s*<answer>.*?</answer>\s*\Z",
-    re.DOTALL,
-)
 
 def extract_answer(text: str) -> str:
     if not isinstance(text, str):
         return ""
     m = ANSWER_RE.search(text)
     return m.group(1).strip() if m else text.strip()
-
-def valid_option_letters(options: Any) -> set:
-    if isinstance(options, list) and options:
-        return {chr(ord("A") + i) for i in range(len(options))}
-    return set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-
-def extract_multiple_choice_answer(text: str, options: Any = None) -> str:
-    if not isinstance(text, str):
-        return ""
-    valid_letters = valid_option_letters(options)
-
-    tagged = ANSWER_RE.search(text)
-    if tagged:
-        tagged_text = tagged.group(1).strip()
-        exact = re.fullmatch(r"\(?([A-Za-z])\)?[.)]?", tagged_text)
-        if exact and exact.group(1).upper() in valid_letters:
-            return exact.group(1).upper()
-        m = re.search(r"\b([A-Za-z])\b", tagged_text)
-        if m and m.group(1).upper() in valid_letters:
-            return m.group(1).upper()
-
-    stripped = text.strip()
-
-    # Common malformed strict-format output: "... A\n</answer>" without the opening tag.
-    m = re.search(r"(?:^|\n|\s)([A-Za-z])\s*</answer>\s*$", stripped, re.IGNORECASE)
-    if m and m.group(1).upper() in valid_letters:
-        return m.group(1).upper()
-
-    phrase_patterns = [
-        r"(?:the\s+)?(?:correct\s+)?(?:answer|option|choice)(?:\s+is|\s*:)?\s*\(?([A-Za-z])\)?(?:\.|\b)",
-        r"(?:therefore|thus|so|hence)[^\n.]{0,120}?\b(?:answer|option|choice)\s*(?:is|:)\s*\(?([A-Za-z])\)?",
-        r"\boption\s+([A-Za-z])\b",
-    ]
-    hits: List[Tuple[int, str]] = []
-    for pattern in phrase_patterns:
-        for match in re.finditer(pattern, stripped, re.IGNORECASE):
-            letter = match.group(1).upper()
-            if letter in valid_letters:
-                hits.append((match.start(), letter))
-    if hits:
-        return sorted(hits)[-1][1]
-
-    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
-    for line in reversed(lines[-8:]):
-        m = re.fullmatch(r"\(?([A-Za-z])\)?[.)]?", line)
-        if m and m.group(1).upper() in valid_letters:
-            return m.group(1).upper()
-        m = re.match(r"^([A-Za-z])\s*[.)]\s+", line)
-        if m and m.group(1).upper() in valid_letters:
-            return m.group(1).upper()
-
-    tail = stripped[-500:]
-    tail_hits = [
-        match.group(1).upper()
-        for match in re.finditer(r"\b([A-Za-z])\b", tail)
-        if match.group(1).upper() in valid_letters
-    ]
-    return tail_hits[-1] if tail_hits else ""
-
-def extract_number_answer(text: str) -> str:
-    if not isinstance(text, str):
-        return ""
-    tagged = ANSWER_RE.search(text)
-    search_text = tagged.group(1) if tagged else text
-
-    phrase_match = re.search(
-        r"(?:answer|value|result)(?:\s+is|\s*:)?\s*(" + NUMBER_RE.pattern + r")",
-        search_text,
-        re.IGNORECASE,
-    )
-    if phrase_match:
-        return phrase_match.group(1).replace(",", "")
-
-    matches = NUMBER_RE.findall(search_text)
-    return matches[-1].replace(",", "") if matches else ""
-
-def extract_prediction_answer(text: str, problem_type: str = "", options: Any = None) -> str:
-    ptype = (problem_type or "").strip().lower()
-    if ptype == "multiple choice":
-        return extract_multiple_choice_answer(text, options)
-    if ptype in {"numerical", "regression"}:
-        return extract_number_answer(text)
-    return extract_answer(text)
-
-def has_answer_tag(text: str) -> bool:
-    return bool(isinstance(text, str) and ANSWER_RE.search(text))
-
-def has_think_tag(text: str) -> bool:
-    return bool(isinstance(text, str) and "<think>" in text and "</think>" in text)
-
-def has_strict_think_answer(text: str) -> bool:
-    return bool(isinstance(text, str) and STRICT_THINK_ANSWER_RE.fullmatch(text))
 
 def normalize_number(num_str: str) -> Optional[float]:
     try:
@@ -318,14 +192,6 @@ def wer(reference: str, hypothesis: str) -> float:
     return d[m][n] / max(1, m)
 
 def compute_rouge_score(reference: str, hypothesis: str) -> float:
-    if rouge_scorer is None:
-        ref_tokens = set((reference or "").lower().split())
-        hyp_tokens = set((hypothesis or "").lower().split())
-        if not ref_tokens and not hyp_tokens:
-            return 1.0
-        if not ref_tokens or not hyp_tokens:
-            return 0.0
-        return len(ref_tokens & hyp_tokens) / len(ref_tokens | hyp_tokens)
     scorer = rouge_scorer.RougeScorer(['rouge1','rouge2','rougeL'], use_stemmer=True)
     scores = scorer.score(reference or "", hypothesis or "")
     return (scores['rouge1'].fmeasure + scores['rouge2'].fmeasure + scores['rougeL'].fmeasure) / 3.0
@@ -371,8 +237,7 @@ def accuracy_only(
     response: str,
     ground_truth: str,
     data_type: str,
-    problem_type: str,
-    options: Any = None,
+    problem_type: str
 ) -> Tuple[float, Dict[str, float]]:
     """
     Returns:
@@ -386,7 +251,7 @@ def accuracy_only(
           seg_image         : {"iou": i, "pos_sim": p, "neg_sim": n}
           seg_video         : {"iou": i, "time_sim": t, "pos_sim": p, "neg_sim": n}
     """
-    ans = extract_prediction_answer(response, problem_type, options) or response.strip()
+    ans = extract_answer(response) or response.strip()
     gt  = extract_answer(ground_truth) or ground_truth or ""
     ptype = (problem_type or "").strip()
     ptype_l = ptype.lower()
@@ -478,76 +343,13 @@ def accuracy_only(
 
 # =============== Component-level R@t statistics ===============
 RECALL_THRESHOLDS = [0.3, 0.5, 0.7]
-BOOTSTRAP_SAMPLES = int(os.environ.get("EVAL_BOOTSTRAP_SAMPLES", "1000"))
-BOOTSTRAP_SEED = int(os.environ.get("EVAL_BOOTSTRAP_SEED", "0"))
-
-def sanitize_metric_key(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return "unknown"
-    text = re.sub(r"\s+", "_", text)
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", text)
-
-def category_for_example(example: Dict[str, Any]) -> str:
-    # Keep categories broad enough to be useful; data_source/path are too high-cardinality.
-    for key in ("dim", "task_type", "original_question_type", "sub_category", "domain"):
-        value = example.get(key)
-        if value is not None and str(value).strip() and str(value).strip().lower() != "none":
-            return str(value).strip()
-    return ""
-
-def valid_answer_for_problem(pred_ans: str, example: Dict[str, Any]) -> bool:
-    ptype = (example.get("problem_type") or "").strip().lower()
-    ans = (pred_ans or "").strip()
-
-    if ptype == "multiple choice":
-        valid_letters = valid_option_letters(example.get("options"))
-        return len(ans) == 1 and ans.upper() in valid_letters
-
-    if ptype in {"numerical", "regression"}:
-        return normalize_number(ans) is not None
-
-    if ptype in {"ocr", "open-ended", "free-form", "math"}:
-        return bool(ans)
-
-    return bool(ans)
-
-def bootstrap_ci(values: List[float], samples: int = BOOTSTRAP_SAMPLES, seed: int = BOOTSTRAP_SEED) -> Tuple[float, float]:
-    if not values:
-        return (0.0, 0.0)
-    if len(values) == 1 or samples <= 0:
-        mean_value = sum(values) / len(values)
-        return (float(mean_value), float(mean_value))
-
-    rng = random.Random(seed)
-    n = len(values)
-    means = []
-    for _ in range(samples):
-        total = 0.0
-        for _ in range(n):
-            total += values[rng.randrange(n)]
-        means.append(total / n)
-    means.sort()
-    low_idx = int(0.025 * (samples - 1))
-    high_idx = int(0.975 * (samples - 1))
-    return (float(means[low_idx]), float(means[high_idx]))
 
 def init_aggregator() -> Dict[str, Any]:
     return {
         "overall_acc_sum": 0.0,
         "overall_count": 0,
-        "acc_values": [],
         "per_type_acc_sum": defaultdict(float),
         "per_type_count": defaultdict(int),
-        "category_acc_sum": defaultdict(float),
-        "category_count": defaultdict(int),
-        "answer_extract_count": 0,
-        "invalid_answer_count": 0,
-        "output_token_sum": 0,
-        "output_token_count": 0,
-        "truncated_count": 0,
-        "has_think_count": 0,
-        "strict_format_count": 0,
 
         # Component-level (by problem_type, then by component name)
         "comp_sum": defaultdict(lambda: defaultdict(float)),     # comp_sum[ptype][comp]
@@ -560,40 +362,14 @@ def accumulate_metrics(
     ptype: str,
     acc: float,
     comp: Dict[str, float],
-    answer_extracted: bool = False,
-    invalid_answer: bool = False,
-    output_tokens: Optional[int] = None,
-    truncated: bool = False,
-    category: str = "",
-    has_think: bool = False,
-    strict_format: bool = False,
 ):
     pkey = (ptype or "").strip()
 
     # overall + per_type accuracy
     agg["overall_acc_sum"] += float(acc)
     agg["overall_count"]   += 1
-    agg["acc_values"].append(float(acc))
     agg["per_type_acc_sum"][pkey] += float(acc)
     agg["per_type_count"][pkey]   += 1
-
-    if category:
-        agg["category_acc_sum"][category] += float(acc)
-        agg["category_count"][category] += 1
-
-    if answer_extracted:
-        agg["answer_extract_count"] += 1
-    if invalid_answer:
-        agg["invalid_answer_count"] += 1
-    if output_tokens is not None:
-        agg["output_token_sum"] += int(output_tokens)
-        agg["output_token_count"] += 1
-    if truncated:
-        agg["truncated_count"] += 1
-    if has_think:
-        agg["has_think_count"] += 1
-    if strict_format:
-        agg["strict_format_count"] += 1
 
     # components
     for cname, cval in comp.items():
@@ -604,50 +380,15 @@ def accumulate_metrics(
             if val >= t:
                 agg["comp_recall_hits"][pkey][cname][t] += 1
 
-def finalize_metrics(agg: Dict[str, Any], include_bootstrap: bool = False) -> Dict[str, Any]:
+def finalize_metrics(agg: Dict[str, Any]) -> Dict[str, Any]:
     out = {}
-    count = max(1, agg["overall_count"])
 
     # overall
-    out["overall/acc"] = agg["overall_acc_sum"] / count
-    out["answer/acc"] = out["overall/acc"]
-    out["answer/extract_rate"] = agg["answer_extract_count"] / count
-    out["answer/invalid_rate"] = agg["invalid_answer_count"] / count
-    out["output/avg_tokens"] = agg["output_token_sum"] / max(1, agg["output_token_count"])
-    out["output/truncation_rate"] = agg["truncated_count"] / count
-    out["format/has_think_rate"] = agg["has_think_count"] / count
-    out["format/strict_rate"] = agg["strict_format_count"] / count
-    out["answer_acc"] = out["answer/acc"]
-    out["answer_extract_rate"] = out["answer/extract_rate"]
-    out["invalid_answer_rate"] = out["answer/invalid_rate"]
-    out["avg_output_tokens"] = out["output/avg_tokens"]
-    out["truncation_rate"] = out["output/truncation_rate"]
-
-    if include_bootstrap:
-        low, high = bootstrap_ci(agg["acc_values"])
-        out["answer/bootstrap_ci_low"] = low
-        out["answer/bootstrap_ci_high"] = high
-        out["bootstrap_ci"] = {"low": low, "high": high}
+    out["overall/acc"] = agg["overall_acc_sum"] / max(1, agg["overall_count"])
 
     # per_type accuracy
     for pkey, cnt in agg["per_type_count"].items():
         out[f"{pkey}/acc"] = agg["per_type_acc_sum"][pkey] / max(1, cnt)
-
-    if agg["category_count"]:
-        category_accs = []
-        per_category_acc = {}
-        per_category_count = {}
-        for category, cnt in sorted(agg["category_count"].items()):
-            acc = agg["category_acc_sum"][category] / max(1, cnt)
-            category_accs.append(acc)
-            per_category_acc[category] = acc
-            per_category_count[category] = cnt
-            slug = sanitize_metric_key(category)
-            out[f"category/{slug}/acc"] = acc
-            out[f"category/{slug}/count"] = cnt
-        out["per_category/macro_acc"] = sum(category_accs) / max(1, len(category_accs))
-        out["per_category_acc"] = per_category_acc
-        out["per_category_count"] = per_category_count
 
     # per_type component means + recalls
     for pkey, comp_sums in agg["comp_sum"].items():
@@ -971,7 +712,6 @@ def prepare_inputs_for_vllm_single(messages, processor):
 # Main pipeline
 # =========================
 def main():
-    eval_start_time = time.perf_counter()
     parser = argparse.ArgumentParser(description="Multimodal Evaluation (accuracy + component-wise recalls)")
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--input_json", type=str, required=True)
@@ -998,7 +738,7 @@ def main():
         "--video_reader",
         choices=["auto", "decord", "pyav", "qwen"],
         default=os.environ.get("EVAL_VIDEO_READER", "auto"),
-        help="auto decodes with decord first and falls back to pyav, skipping torchvision.",
+        help="auto tries qwen-vl-utils/decord first and falls back to pyav for videos that fail.",
     )
     parser.add_argument(
         "--frame_cache_dir",
@@ -1011,11 +751,6 @@ def main():
         action="store_true",
         default=os.environ.get("EVAL_DISABLE_FRAME_CACHE", "0") == "1",
         help="Disable runtime decoded-frame cache.",
-    )
-    parser.add_argument(
-        "--rescore_existing",
-        action="store_true",
-        help="Only rescore an existing output JSON with the current answer extraction logic; do not load the model.",
     )
     args = parser.parse_args()
 
@@ -1052,100 +787,24 @@ def main():
     final_output: List[Dict[str, Any]] = []
     agg = init_aggregator()
     start_idx = 0
-    existing_meta: Dict[str, Any] = {}
     if output_json_path.exists():
         try:
             with open(output_json_path, "r", encoding="utf-8") as f:
                 existing = json.load(f)
             final_output = existing.get("results", [])
-            existing_meta = existing.get("meta", {}) if isinstance(existing.get("meta"), dict) else {}
             # Replay once to restore aggregation (ensure consistency)
             agg = init_aggregator()
             for sample in final_output:
+                acc = float(sample.get("accuracy", 0.0))
                 ptype = sample.get("problem_type", "")
-                out_text = sample.get("output", "")
-                pred_ans = extract_prediction_answer(out_text, ptype, sample.get("options"))
-                acc, comps = accuracy_only(
-                    response=out_text,
-                    ground_truth=sample.get("solution", ""),
-                    data_type=(sample.get("data_type") or "").strip().lower(),
-                    problem_type=ptype,
-                    options=sample.get("options"),
-                )
-                sample["prediction"] = pred_ans
-                sample["accuracy"] = float(acc)
-                sample["answer_extracted"] = bool(pred_ans)
-                sample["invalid_answer"] = not valid_answer_for_problem(pred_ans, sample)
-                if comps:
-                    sample["components"] = {k: float(v) for k, v in comps.items()}
-                elif "components" in sample:
-                    sample.pop("components", None)
-                output_tokens = sample.get("output_tokens")
-                if output_tokens is not None:
-                    try:
-                        output_tokens = int(output_tokens)
-                    except Exception:
-                        output_tokens = None
-                accumulate_metrics(
-                    agg,
-                    ptype,
-                    acc,
-                    comps,
-                    answer_extracted=bool(pred_ans),
-                    invalid_answer=not valid_answer_for_problem(pred_ans, sample),
-                    output_tokens=output_tokens,
-                    truncated=bool(sample.get("truncated", False)),
-                    category=sample.get("category", category_for_example(sample)),
-                    has_think=bool(sample.get("has_think", has_think_tag(out_text))),
-                    strict_format=bool(sample.get("strict_format", has_strict_think_answer(out_text))),
-                )
+                comps = sample.get("components", {}) if isinstance(sample.get("components"), dict) else {}
+                accumulate_metrics(agg, ptype, acc, comps)
             start_idx = len(final_output)
             print(f"[Resume] Found {start_idx} processed samples, resume from {start_idx}.")
         except Exception as e:
             print(f"[Warn] Failed to read existing output: {e}")
 
-    if args.rescore_existing:
-        if not output_json_path.exists():
-            raise FileNotFoundError(f"--rescore_existing requires an existing output file: {output_json_path}")
-        metrics_dict = finalize_metrics(agg, include_bootstrap=True)
-        meta = dict(existing_meta)
-        meta["rescored"] = True
-        meta["rescore_elapsed_seconds"] = time.perf_counter() - eval_start_time
-        with open(output_json_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "results": final_output,
-                    "metrics": metrics_dict,
-                    "meta": meta,
-                },
-                f,
-                indent=2,
-                ensure_ascii=False,
-            )
-        print(f"[Rescore] Saved {len(final_output)} samples to {output_json_path}")
-        print("[Metrics]")
-        for k, v in metrics_dict.items():
-            print(f"{k}: {v}")
-        return
-
     # Initialize model
-    missing_runtime = [
-        name
-        for name, obj in (
-            ("torch", torch),
-            ("transformers", AutoProcessor),
-            ("vllm", LLM),
-            ("SamplingParams", SamplingParams),
-            ("qwen_vl_utils", process_vision_info),
-        )
-        if obj is None
-    ]
-    if missing_runtime:
-        raise RuntimeError(
-            "Full evaluation requires missing runtime dependencies: "
-            + ", ".join(missing_runtime)
-            + ". Use --rescore_existing to update existing outputs without generation."
-        )
     os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
     torch.manual_seed(args.seed)
 
@@ -1179,7 +838,10 @@ def main():
             question = f"{question}\nOptions:\n{opts}"
 
         pt_lower = pt.strip().lower()
-        type_key = pt if pt in TYPE_TEMPLATE else pt_lower
+        if pt_lower == "segmentation":
+            type_key = "segmentation_video" if data_type == "video" else "segmentation_image"
+        else:
+            type_key = pt if pt in TYPE_TEMPLATE else pt_lower
 
         tail = TYPE_TEMPLATE.get(type_key, "")
         return QUESTION_TEMPLATE.format(Question=question) + tail
@@ -1193,15 +855,6 @@ def main():
             "write": int(frame_cache_stats["write"]),
             "write_skip": int(frame_cache_stats["write_skip"]),
             "fallback_to_pyav": int(frame_cache_stats["fallback_to_pyav"]),
-        }
-
-    def output_meta() -> Dict[str, Any]:
-        return {
-            "batch_size": BSZ,
-            "model_path": args.model_path,
-            "input_json": args.input_json,
-            "elapsed_seconds": time.perf_counter() - eval_start_time,
-            "frame_cache": frame_cache_meta(),
         }
 
     def read_video_frames_with_cache(
@@ -1279,16 +932,13 @@ def main():
             add_path = os.path.join(args.base_prefix, add_raw.lstrip("./").lstrip("/"))
 
         video_payload = full_path
-        if data_type in {"video", "video-image"}:
-            video_start = example.get("video_start", example.get("start"))
-            video_end = example.get("video_end", example.get("end"))
-            if video_reader in {"auto", "decord", "pyav"}:
-                video_payload = read_video_frames_with_cache(
-                    full_path,
-                    video_reader=video_reader,
-                    video_start=video_start,
-                    video_end=video_end,
-                )
+        if video_reader in {"auto", "decord", "pyav"} and data_type in {"video", "video-image"}:
+            video_payload = read_video_frames_with_cache(
+                full_path,
+                video_reader=video_reader,
+                video_start=example.get("video_start", example.get("start")),
+                video_end=example.get("video_end", example.get("end")),
+            )
 
         content = build_user_content_item(
             data_type=data_type,
@@ -1304,8 +954,7 @@ def main():
 
     # Main loop
     BSZ = args.batch_size
-    progress_desc = f"{in_base} batches"
-    for i in tqdm(range(start_idx, len(data), BSZ), desc=progress_desc):
+    for i in tqdm(range(start_idx, len(data), BSZ), desc="Batches"):
         batch = data[i:i+BSZ]
 
         inputs_for_vllm = []
@@ -1315,88 +964,26 @@ def main():
         # Generation
         try:
             outputs = llm.generate(inputs_for_vllm, sampling_params=sampling_params, use_tqdm=False)
-            texts = []
-            completion_infos = []
-            for output in outputs:
-                completion = output.outputs[0] if getattr(output, "outputs", None) else None
-                if completion is None:
-                    texts.append("<answer>ERROR</answer>")
-                    completion_infos.append({
-                        "finish_reason": "missing_completion",
-                        "stop_reason": None,
-                        "output_tokens": 0,
-                        "truncated": False,
-                    })
-                    continue
-
-                text = completion.text
-                token_ids = getattr(completion, "token_ids", None)
-                output_tokens = len(token_ids) if token_ids is not None else None
-                finish_reason = getattr(completion, "finish_reason", None)
-                stop_reason = getattr(completion, "stop_reason", None)
-                finish_reason_l = str(finish_reason or "").lower()
-                truncated = (
-                    finish_reason_l == "length"
-                    or (
-                        output_tokens is not None
-                        and output_tokens >= args.max_tokens
-                        and finish_reason_l not in {"stop", "eos_token"}
-                    )
-                )
-
-                texts.append(text)
-                completion_infos.append({
-                    "finish_reason": finish_reason,
-                    "stop_reason": stop_reason,
-                    "output_tokens": output_tokens,
-                    "truncated": truncated,
-                })
+            texts = [o.outputs[0].text for o in outputs]
         except Exception as e:
             print(f"[Error] vLLM generate failed at batch start_idx={i}: {e}")
             texts = ["<answer>ERROR</answer>"] * len(inputs_for_vllm)
-            completion_infos = [
-                {
-                    "finish_reason": "generation_error",
-                    "stop_reason": None,
-                    "output_tokens": 0,
-                    "truncated": False,
-                }
-                for _ in inputs_for_vllm
-            ]
 
         # Evaluation + accumulation + write results
-        for example, out_text, completion_info in zip(batch, texts, completion_infos):
-            pred_ans = extract_prediction_answer(out_text, example.get("problem_type", ""), example.get("options"))
+        for example, out_text in zip(batch, texts):
+            pred_ans = extract_answer(out_text)
             gt_ans   = example.get("solution", "")
 
             acc, components = accuracy_only(
                 response=out_text,
                 ground_truth=gt_ans,
                 data_type=(example.get("data_type") or "").strip().lower(),
-                problem_type=example.get("problem_type",""),
-                options=example.get("options"),
+                problem_type=example.get("problem_type","")
             )
-
-            answer_extracted = bool(pred_ans)
-            invalid_answer = not valid_answer_for_problem(pred_ans, example)
-            output_tokens = completion_info.get("output_tokens")
-            truncated = bool(completion_info.get("truncated", False))
-            has_think = has_think_tag(out_text)
-            strict_format = has_strict_think_answer(out_text)
-            category = category_for_example(example)
 
             sample_out = dict(example)
             sample_out["output"] = out_text
             sample_out["prediction"] = pred_ans
-            sample_out["answer_extracted"] = answer_extracted
-            sample_out["invalid_answer"] = invalid_answer
-            sample_out["output_tokens"] = output_tokens
-            sample_out["finish_reason"] = completion_info.get("finish_reason")
-            sample_out["stop_reason"] = completion_info.get("stop_reason")
-            sample_out["truncated"] = truncated
-            sample_out["has_think"] = has_think
-            sample_out["strict_format"] = strict_format
-            sample_out["category"] = category
             # —— New: for Segmentation, only extract <answer> content into predicted_answer_norm (no metric calculation)
             if (example.get("problem_type","").strip().lower() == "segmentation"):
                 sample_out["predicted_answer_norm"] = pred_ans
@@ -1410,25 +997,23 @@ def main():
                 agg,
                 example.get("problem_type",""),
                 float(acc),
-                components,
-                answer_extracted=answer_extracted,
-                invalid_answer=invalid_answer,
-                output_tokens=output_tokens,
-                truncated=truncated,
-                category=category,
-                has_think=has_think,
-                strict_format=strict_format,
+                components
             )
 
         # Write to disk per batch (including accumulated metrics)
-        metrics_dict = finalize_metrics(agg, include_bootstrap=False)
+        metrics_dict = finalize_metrics(agg)
         try:
             with open(output_json_path, "w", encoding="utf-8") as f:
                 json.dump(
                     {
                         "results": final_output,
                         "metrics": metrics_dict,
-                        "meta": output_meta()
+                        "meta": {
+                            "batch_size": BSZ,
+                            "model_path": args.model_path,
+                            "input_json": args.input_json,
+                            "frame_cache": frame_cache_meta()
+                        }
                     },
                     f, indent=2, ensure_ascii=False
                 )
@@ -1436,21 +1021,22 @@ def main():
             print(f"[Warn] Failed to write output json at batch end (i={i}): {e}")
 
     # Final write to disk
-    metrics_dict = finalize_metrics(agg, include_bootstrap=True)
+    metrics_dict = finalize_metrics(agg)
     with open(output_json_path, "w", encoding="utf-8") as f:
         json.dump(
             {
                 "results": final_output,
                 "metrics": metrics_dict,
-                "meta": output_meta()
+                "meta": {
+                    "batch_size": BSZ,
+                    "model_path": args.model_path,
+                    "input_json": args.input_json,
+                    "frame_cache": frame_cache_meta()
+                }
             },
             f, indent=2, ensure_ascii=False
         )
     print(f"[Done] Saved {len(final_output)} samples to {output_json_path}")
-    print(f"[Time] elapsed_seconds: {time.perf_counter() - eval_start_time:.2f}")
-    print("[FrameCache]")
-    for k, v in frame_cache_meta().items():
-        print(f"  {k}: {v}")
     print("[Metrics]")
     for k, v in metrics_dict.items():
         try:

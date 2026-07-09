@@ -143,6 +143,81 @@ config/sft/
 - v7 在 loss 上略好于 v6，但需要完整评测确认。
 - 高分辨率（v5）和 video-only（v8）目前还缺有效训练/评测结果，不能下结论。
 
+## 待验证计划
+
+当前目标是尽快选出一个可作为后续训练起点的 SFT，而不是把 SFT 超参空间完整扫完。下面按信息增益排序，优先保留会改变模型选择的实验；训练系统类超参和必然会在 RL 阶段验证的内容先不单独消融。
+
+### P0. 先补齐已有/已配置实验
+
+| 实验 | 目的 | 当前动作 |
+|---|---|---|
+| `SFT-v7-10k` 完整 benchmark | 判断 vision tower + projector 都解冻是否真的优于 v6/v3 | 只补评测，不新增训练变量 |
+| `SFT-v9-10k-3ep` | 判断 10k mixed 多训是否还有收益 | 可跑 |
+| `SFT-v10-50k` | 判断扩大数据覆盖是否比重复 10k 更有效 | 可跑 |
+
+优先级判断：
+
+- v9 和 v10 是目前最直接的方向：一个回答“多训是否有用”，一个回答“多数据是否有用”。
+- v7 已经有 loss 结果，只差 benchmark；补评测成本低，应该先完成。
+- v5 目前缺有效训练结果，且只改 `image_max_pixels`，对视频 benchmark 的直接价值不如 v9/v10。
+
+### P1. 只保留少量数据与视频侧实验
+
+不要完整扫数据配比和视频采样网格。先做最可能改变结论的少数点。
+
+| 实验 | 目的 | 是否保留 |
+|---|---|---|
+| `video-only` / v8 | 看纯视频数据是否显著提升视频 benchmark | 保留一个点 |
+| `video_maxlen=32` | 看更多帧是否提升长视频/时序任务 | 保留一个点 |
+| `video_max_pixels=200704` | 看视频分辨率是否提升细节类任务 | 保留一个点 |
+| `video-70` / `video-90` | 精细数据配比 | 暂不做 |
+| `temporal-heavy` | 专门服务 T-GRPO 的采样权重 | 暂不做，等 RL 误差分析后再说 |
+| `math-ocr-balanced` | 针对 VideoMathQA/OCR 短板 | 暂不做，VideoMathQA 当前整体都低，先别为单项开分支 |
+| low-res / fewer-frames / low-fps / high-fps | 成本或采样网格 | 暂不做 |
+
+### P1. CoT 长度先统计，不急着训练新版本
+
+SFT/RL 的输出长度、截断率和 answer extraction 很关键，但现在先做数据统计和结果归因，不立刻开 `short-cot` / `answer-focused` / `answer-only` 三个训练分支。
+
+先统计：
+
+- target answer token 长度分布。
+- `<think>` token 长度分布。
+- `<answer>` token 长度分布。
+- 被 `cutoff_len` 截断的比例。
+- benchmark 结果里的 `avg_output_tokens`、`truncation_rate`、`answer_extract_rate`、`invalid_answer_rate`。
+
+只有当统计显示某个候选模型明显有输出过长、截断或抽取失败问题时，再做一个 `answer-focused` 版本。`answer-only` 暂不做，风险是牺牲 reasoning 信号，而且和当前 TimeThinker/RL 目标不完全一致。
+
+### P2. 只保留 checkpoint selection，不扩训练系统超参
+
+不要只评估 final checkpoint。每个重要 SFT run 尽量保存并评估：
+
+```text
+checkpoint-250
+checkpoint-500
+final
+```
+
+重点看：
+
+- final 是否已经过拟合。
+- eval loss 最低点是否等于 benchmark 最好点。
+- 1ep / 2ep / 3ep 哪个 checkpoint 更适合作为后续训练起点。
+
+### 暂不单独做的实验
+
+这些先从 SFT 消融里移出，除非后面出现明确故障信号。
+
+| 类别 | 暂不做原因 |
+|---|---|
+| Scheduler / Warmup | 当前主要瓶颈不是训练不稳定；信息增益低，容易消耗大量 run。 |
+| Weight Decay / Gradient Norm | 这类优化器细节一般收益小，且很难用少量 benchmark 稳定归因。 |
+| Batch size / Gradient Accumulation | 只在 OOM、吞吐太差或 loss 明显抖动时调整；不作为质量消融。 |
+| `cutoff_len=8192/32768` 训练消融 | 先统计截断率；没有明显截断问题就不跑。 |
+| Full Finetune vs LoRA | 当前主线是 full finetune，LoRA 对最终路线帮助有限，先不分叉。 |
+| SFT -> RL smoke 作为 SFT 消融项 | RL 本来就是下一阶段要做，不需要在 SFT 文档里单列一组额外实验。 |
+
 ## 后续建议
 
 优先做少量清晰实验，不要继续叠变量：
@@ -150,9 +225,11 @@ config/sft/
 1. 补齐 `SFT-v7-10k` 的完整 benchmark，和 `SFT-v6-10k`、`SFT-v3-10000-1ep` 对比。
 2. 跑 `SFT-v9-10k-3ep`，确认 10k 数据是否还能从更多 epoch 受益。
 3. 跑 `SFT-v10-50k`，确认扩大数据覆盖面是否比重复 10k 更有效。
-4. 如果继续跑高分辨率实验，以 v5 为准，保持 LR/epoch 不变，只改 `image_max_pixels`，否则难以归因。
+4. 如需补视频侧视觉配置，只跑 `video_maxlen=32` 和 `video_max_pixels=200704` 两个点，先不扫 fps/resolution/frame 网格。
 5. 如果验证 video-only，建议和 mixed 数据保持相近 step 数，而不只是比较 `max_samples`。
-6. 每次训练前把实际使用的 YAML 复制到模型输出目录，例如 `train_config.yaml`，避免后续只能从 SwanLab 或当前配置文件反推。
+6. 统计 SFT CoT 长度、target 长度和 `cutoff_len` 截断率，再决定是否做 short-CoT / answer-focused。
+7. 暂不单独做 scheduler/warmup、weight decay/grad norm、LoRA、batch/GA、cutoff_len 训练消融。
+8. 每次训练前把实际使用的 YAML 复制到模型输出目录，例如 `train_config.yaml`，避免后续只能从 SwanLab 或当前配置文件反推。
 
 ## 结果速记
 
