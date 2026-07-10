@@ -450,8 +450,9 @@ def process_video(
     video: str, min_pixels: int = 4*32*32, max_pixels: int = 64*32*32, max_frames: int = 128, video_fps: float = 2, return_fps: bool = False
 ):
     vision_info = {"video": video, "min_pixels": min_pixels, "max_pixels": max_pixels, "max_frames": max_frames, "fps": video_fps}
+    is_video_path = isinstance(video, (str, os.PathLike))
     try:
-        if _rl_frame_cache_root() is not None:
+        if is_video_path and _rl_frame_cache_root() is not None:
             return _fetch_video_with_frame_cache(
                 vision_info,
                 image_patch_size=16,
@@ -465,6 +466,9 @@ def process_video(
             return_video_metadata=return_fps,
         )
     except Exception as exc:
+        if not is_video_path:
+            raise
+
         print(f"fetch_video failed for {video}, falling back to pyav: {exc}")
         return _fetch_video_with_pyav(vision_info, image_patch_size=16, return_fps=return_fps)
 

@@ -481,28 +481,9 @@ class RayPPOTrainer:
 
         return video_indices
 
-    @staticmethod
-    def _video_tensor_to_pil_frames(video_tensor: torch.Tensor) -> list[Any]:
-        from PIL import Image
-
-        frames = []
-        video_tensor = video_tensor.detach().cpu()
-        for frame in video_tensor:
-            if frame.ndim == 3 and frame.shape[0] in (1, 3):
-                frame = frame.permute(1, 2, 0)
-            frame_array = frame.numpy()
-            frame_array = np.clip(frame_array, 0, 255).astype(np.uint8)
-            if frame_array.ndim == 2:
-                frame_array = np.stack([frame_array] * 3, axis=-1)
-            if frame_array.shape[-1] == 1:
-                frame_array = np.repeat(frame_array, 3, axis=-1)
-            frames.append(Image.fromarray(frame_array))
-
-        return frames
-
-    def _sample_video_frames_for_shuffle(self, video: Any) -> list[Any]:
-        if isinstance(video, (list, tuple)):
-            return list(video)
+    def _process_video_for_shuffle(self, video: Any) -> tuple[torch.Tensor, dict[str, Any]]:
+        if isinstance(video, tuple) and len(video) == 2 and isinstance(video[1], dict):
+            return video[0], deepcopy(video[1])
 
         processed_video, _ = process_video(
             video,
@@ -511,14 +492,14 @@ class RayPPOTrainer:
             video_fps=self.config.data.video_fps,
             return_fps=True,
         )
-        if isinstance(processed_video, tuple):
-            processed_video = processed_video[0]
 
-        if isinstance(processed_video, torch.Tensor):
-            return self._video_tensor_to_pil_frames(processed_video)
-
-        if isinstance(processed_video, (list, tuple)):
-            return list(processed_video)
+        if (
+            isinstance(processed_video, tuple)
+            and len(processed_video) == 2
+            and isinstance(processed_video[0], torch.Tensor)
+            and isinstance(processed_video[1], dict)
+        ):
+            return processed_video[0], deepcopy(processed_video[1])
 
         raise TypeError(f"Unsupported processed video type for T-GRPO shuffle: {type(processed_video)}")
 
@@ -526,12 +507,15 @@ class RayPPOTrainer:
         shuffled_mm_data = deepcopy(mm_data)
         shuffled_videos = []
         for video in mm_data.get("videos") or []:
-            frames = self._sample_video_frames_for_shuffle(video)
-            if len(frames) == 0:
+            video_tensor, metadata = self._process_video_for_shuffle(video)
+            if len(video_tensor) == 0:
                 return None
 
-            indices = np.random.permutation(len(frames))
-            shuffled_videos.append([frames[i] for i in indices])
+            indices = np.random.permutation(len(video_tensor))
+            shuffled_tensor = video_tensor[torch.as_tensor(indices, device=video_tensor.device)]
+            if isinstance(metadata.get("frames_indices"), list) and len(metadata["frames_indices"]) == len(indices):
+                metadata["frames_indices"] = [metadata["frames_indices"][i] for i in indices]
+            shuffled_videos.append((shuffled_tensor, metadata))
 
         shuffled_mm_data["videos"] = shuffled_videos
         return shuffled_mm_data

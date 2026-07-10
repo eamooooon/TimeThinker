@@ -44,11 +44,11 @@ run_one() {
   echo "[DONE] ${name}"
 }
 
-run_one \
-  "rl_4b-bs16-van-100" \
-  "grpo" \
-  "models/TimeThinker-4B-RL-bs16-van-100" \
-  "algorithm.temporal=false" || exit $?
+# run_one \
+#   "rl_4b-bs16-van-100" \
+#   "grpo" \
+#   "models/TimeThinker-4B-RL-bs16-van-100" \
+#   "algorithm.temporal=false" || exit $?
 
 run_one \
   "rl_4b-bs16-tgrpo-diagnose-100" \

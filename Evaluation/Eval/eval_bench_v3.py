@@ -107,33 +107,34 @@ QUESTION_TEMPLATE = (
 
 TYPE_TEMPLATE = {
     "multiple choice": (
-        "The final answer inside <answer> must be only one option letter from the given options.\n"
-        "Use <think> for reasoning, then put only the final option letter inside <answer>."
+        "The final answer inside <answer> must be only the single option letter "
+        "(e.g., A, B, C, D, etc.).\n"
+        "Example:\n<think>The correct option is A.</think>\n<answer>A</answer>"
     ),
     "numerical": (
         "The final answer inside <answer> must be only the numerical value.\n"
-        "Use <think> for reasoning, then put only the final numerical value inside <answer>."
+        "Example:\n<think>Compute the requested value.</think>\n<answer>3.14</answer>"
     ),
     "OCR": (
         "The final answer inside <answer> must be only the transcribed text.\n"
-        "Use <think> for reasoning, then put only the final transcribed text inside <answer>."
+        "Example:\n<think>Read the visible text.</think>\n<answer>Hello World</answer>"
     ),
     "open-ended": (
         "The final answer inside <answer> must be only your concise text answer.\n"
-        "Use <think> for reasoning, then put only the final concise text answer inside <answer>."
+        "Example:\n<think>Identify the requested fact.</think>\n<answer>The capital of France is Paris.</answer>"
     ),
     "free-form": (
         "The final answer inside <answer> must be only your concise text answer.\n"
-        "Use <think> for reasoning, then put only the final concise text answer inside <answer>."
+        "Example:\n<think>Identify the requested fact.</think>\n<answer>The capital of France is Paris.</answer>"
     ),
     "regression": (
         "The final answer inside <answer> must be only the numerical value.\n"
-        "Use <think> for reasoning, then put only the final numerical estimate inside <answer>."
+        "Example:\n<think>Estimate the target value.</think>\n<answer>42.7</answer>"
     ),
     "math": (
         "The final answer inside <answer> must be only the final result "
         "(a number or LaTeX formula).\n"
-        "Use <think> for reasoning, then put only the final result inside <answer>."
+        "Example:\n<think>Solve the expression.</think>\n<answer>$$-\\dfrac{3}{2}$$</answer>"
     )
 }
 

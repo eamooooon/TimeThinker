@@ -97,11 +97,16 @@ def _process_multi_modal_data(
             images.append(process_image(image, min_pixels, max_pixels))
 
     if "videos" in multi_modal_data:
-        # 记录第一段视频的 fps（vLLM 通常按每样本一个视频使用）
-        first_fps: Optional[float] = None
-        for idx, video in enumerate(multi_modal_data["videos"]):
-            # 兼容带 fps 返回；若项目内函数不支持 return_fps，则回退到原始行为
-            processed, sample_fps = process_video(
+        for video in multi_modal_data["videos"]:
+            if (
+                isinstance(video, tuple)
+                and len(video) == 2
+                and isinstance(video[1], dict)
+            ):
+                videos.append(video)
+                continue
+
+            processed, _ = process_video(
                 video,
                 min_pixels=min_pixels,
                 max_pixels=max_pixels,
