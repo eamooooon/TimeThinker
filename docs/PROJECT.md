@@ -303,11 +303,11 @@ RL 阶段需要大量可判分输出。Instruct + SFT cold start 的路线可以
 当前基础链路已经跑通，后续推进重点是：
 
 1. 每次新实验固定 config、模型目录和 SwanLab run name，避免命名漂移。
-2. SFT 继续按 `docs/sft_ablation.md` 做单变量消融。
-3. RL 继续按 `docs/rl_ablation.md` 比较 GRPO、EMA-GRPO、T-GRPO、online filtering 和 KL。
+2. SFT 继续按 `docs/archive/sft_ablation.md` 做单变量消融。
+3. RL 继续按 `docs/archive/rl_ablation.md` 比较 GRPO、EMA-GRPO、T-GRPO、online filtering 和 KL。
 4. 评测先用 `MAX_SAMPLES` 快速验证，再对候选模型跑完整 benchmark。
 5. 对慢 benchmark 使用 frame cache，并记录 `_summary.md` 中的耗时和 cache 命中。
-6. bad case 统一记录到 `docs/bad_case.md` 的模板中。
+6. bad case 统一记录到 `docs/archive/bad_case.md` 的模板中。
 
 当前最重要的边界是：
 

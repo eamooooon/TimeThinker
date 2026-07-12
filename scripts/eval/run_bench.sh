@@ -8,7 +8,7 @@ cd "$REPO_ROOT"
 # math-style QA benchmarks that match the current model and metric script.
 
 MODEL_PATHS=(
-  "${MODEL_PATH:-models/TimeThinker-4B-SFT-v3-10000-1ep}"
+  "${MODEL_PATH:-models/TimeThinker-4B-SFT-v10-50k-canonical/checkpoint-1000}"
 )
 # MODEL_PATHS=(
 #   "${MODEL_PATH:-Qwen/Qwen3-VL-4B-Instruct}"

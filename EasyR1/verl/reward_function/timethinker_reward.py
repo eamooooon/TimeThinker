@@ -233,7 +233,7 @@ def evaluate_open_ended_with_rm(
 # -------------------------
 def compute_score(
     reward_inputs: List[Dict[str, Any]],
-    format_weight: float = 0.1,
+    format_weight: float = 0.2,
     # ===== Still kept as configurable parameters =====
     rm_server_type: str = "vllm",
     rm_batch_size: int = 64,

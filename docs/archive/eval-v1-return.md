@@ -1,21 +1,23 @@
 # eval-v1-return 评测汇总
 
-记录 `Evaluation/eval-v1-return/*/frames16` 的复测汇总结果。本文档把这套结果记为 `eval-v1-return`，用于和主评测 `Evaluation/results/*/frames16` 做 prompt/return 口径对照。
+记录 `Evaluation/results-v1-rerun/*/frames16` 的复测汇总结果。本文档把这套结果记为 `eval-v1-return`，用于和主评测 `Evaluation/results-v4/*/frames16` 做 prompt/return 口径对照。
 
 ## 口径说明
 
 - `eval-v1-return` 来源：从 `Evaluation/results-v1-rerun/<model>/frames16/eval_*.json` 解析并汇总而来。
-- 正式汇总文件：`Evaluation/eval-v1-return/<model>/frames16/_summary.json` 和 `Evaluation/eval-v1-return/_all_summaries.json`。
+- 单模型汇总文件：`Evaluation/results-v1-rerun/<model>/frames16/_summary.json`。
 - `Avg`：各 benchmark 的 `answer_acc` 简单未加权平均。
 - `frames16`：所有结果均为 `MAX_FRAMES=16`。
 - 这套结果不是主榜替代，而是用于观察不同 prompt/return 格式下模型是否稳定。
-- 当前有 14 个完整 8 项模型，以及 1 个不完整模型 `TimeThinker-4B-SFT-v9-10k-3ep`。
+- 当前有 15 个完整 8 项模型，以及 1 个不完整模型 `TimeThinker-4B-SFT-v9-10k-3ep`。
+- `TimeThinker-4B-RL-Zero-100-van` 来自 `Evaluation/results-v1-rerun/TimeThinker-4B-RL-Zero-100-van/frames16`；主 bench 对照时使用对应目录名 `TimeThinker-4B-RL-Zero-100-van-bs16`。
 - `TimeThinker-4B-SFT-v9-10k-3ep` 只有 5 项有效结果：LongVideoReason、MVBench、VideoMME、VideoMMMU、VSIBench。MMVU / VideoMathQA 当前没有有效汇总，TempCompass JSON 截断，因此不能和完整 8 项模型直接比较。
 
 ## 总表
 
 | Model | Avg | N | Samples | LongVideoReason | MMVU | MVBench | TempCompass | VideoMathQA | VideoMME | VideoMMMU | VSIBench |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `TimeThinker-4B-RL-Zero-100-van` | 55.68 | 8 | 22315 | 69.10 | 65.76 | 62.73 | 72.20 | 20.95 | 54.89 | 52.00 | 47.78 |
 | `TimeThinker-4B-SFT-v3-10000` | 55.35 | 8 | 22315 | 69.30 | 65.12 | 62.58 | 68.41 | 23.81 | 55.37 | 52.67 | 45.53 |
 | `TimeThinker-4B-SFT` | 55.15 | 8 | 22315 | 71.00 | 63.20 | 62.80 | 67.52 | 24.52 | 54.63 | 52.44 | 45.07 |
 | `TimeThinker-4B-RL-Zero-100-ema-v2` | 55.15 | 8 | 22315 | 68.80 | 65.60 | 61.22 | 72.49 | 21.90 | 54.52 | 51.22 | 45.40 |
@@ -48,11 +50,12 @@
 | `TimeThinker-4B-SFT-v3-10000-1ep` | 54.09 | 48.91 | +5.18 |
 | `TimeThinker-4B-SFT-v6-10k` | 54.47 | 49.95 | +4.52 |
 | `TimeThinker-4B-SFT-v7-10k` | 53.16 | 50.15 | +3.01 |
+| `TimeThinker-4B-RL-Zero-100-van` / `van-bs16` | 55.68 | 54.83 | +0.84 |
 | `TimeThinker-4B-RL-Zero-100-tgrpo-van` | 54.40 | 55.38 | -0.98 |
 | `TimeThinker-4B-RL-Zero-100-ema-v2` | 55.15 | 56.31 | -1.16 |
 | `TimeThinker-4B-RL-Zero-100-van-v2` | 53.72 | 56.57 | -2.85 |
 
-这个差异说明 `eval-v1-return` 对 SFT 和基座模型更友好，尤其是原本缺少严格 `<answer>` 格式或在主 bench strict-ish prompt 下容易格式/抽取失败的模型。RL 模型在主 bench 下反而更强，说明它们更适配当前主评测的结构化输出要求。
+这个差异说明 `eval-v1-return` 对 SFT 和基座模型更友好，尤其是原本缺少严格 `<answer>` 格式或在主 bench strict-ish prompt 下容易格式/抽取失败的模型。RL 模型之间并不完全一致：`van` 这次在 `eval-v1-return` 下略高于主 bench，`tgrpo-van`、`ema-v2`、`van-v2` 则仍然是主 bench 更高，说明不同 RL checkpoint 对 prompt/return 口径的敏感性不一样。
 
 ## ema-v2 对照主 bench
 
@@ -100,8 +103,8 @@
 ## 当前结论
 
 - `eval-v1-return` 不应替代主 bench 排名。它更像 prompt/return 口径敏感性诊断。
-- 完整 8 项里，`TimeThinker-4B-SFT-v3-10000` 是当前 `eval-v1-return` 最强模型，Avg 为 55.35。
-- `eval-v1-return` 对 SFT / base 明显更友好；主 bench 对 RL 更友好，尤其 `van-v2` 在主 bench 高出 `eval-v1-return` 2.85 点。
+- 完整 8 项里，`TimeThinker-4B-RL-Zero-100-van` 是当前 `eval-v1-return` 最强模型，Avg 为 55.68。
+- `eval-v1-return` 对 SFT / base 明显更友好；RL checkpoint 的方向不完全一致，其中 `van` 在 `eval-v1-return` 高出主 bench 0.84 点，而 `van-v2` 在主 bench 高出 `eval-v1-return` 2.85 点。
 - `eval-v1-return` 更适合作为 prompt sensitivity 诊断：它能暴露哪些样本是 prompt 触发型正确，哪些样本是稳定能力。
 - `ema-v2` 的样本级翻转很多，说明模型在时间变化、计数、读图和选项映射上仍不够 prompt-invariant。
 - 如果后续要降低 prompt 差异带来的波动，可以考虑多模板评测、prompt ensemble，或者在 SFT/RL 中加入多 prompt 模板训练。

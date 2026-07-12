@@ -148,7 +148,7 @@ def warm_one(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="config/rl/qwen3_rl_t.yaml", help="RL yaml config.")
+    parser.add_argument("--config", default="config/rl/qwen3_rl_bs16.yaml", help="RL yaml config.")
     parser.add_argument("--data-file", action="append", default=None, help="JSON data file. Can be passed multiple times.")
     parser.add_argument("--include-val", action="store_true", help="Also warm config.data.val_files.")
     parser.add_argument("--cache-dir", default="data/.cache/rl_frames", help="RL frame cache directory.")

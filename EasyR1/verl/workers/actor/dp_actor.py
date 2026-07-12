@@ -22,7 +22,6 @@ from typing import Any, Optional
 import torch
 import torch.distributed as dist
 from einops import rearrange
-from ray.experimental.tqdm_ray import tqdm
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
@@ -201,8 +200,7 @@ class DataParallelPPOActor(BasePPOActor):
             micro_batches = data.split(self.config.micro_batch_size_per_device_for_experience)
 
         log_probs_lst = []
-        if self.rank == 0:
-            micro_batches = tqdm(micro_batches, desc="Compute log probs", position=1)
+        # Keep worker logs quiet. The trainer owns the single top-level step bar.
 
         for micro_batch in micro_batches:
             model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
@@ -230,8 +228,6 @@ class DataParallelPPOActor(BasePPOActor):
 
         metrics = defaultdict(list)
         for _ in range(self.config.ppo_epochs):
-            if self.rank == 0:
-                mini_batches = tqdm(mini_batches, desc="Train mini-batches", position=1)
 
             for mini_batch in mini_batches:
                 total_response_tokens = torch.sum(mini_batch.batch["response_mask"])
@@ -243,9 +239,6 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
                 else:
                     micro_batches = mini_batch.split(self.config.micro_batch_size_per_device_for_update)
-
-                if self.rank == 0:
-                    micro_batches = tqdm(micro_batches, desc="Update policy", position=2)
 
                 for micro_batch in micro_batches:
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
@@ -276,8 +269,13 @@ class DataParallelPPOActor(BasePPOActor):
                         )
                         kl_loss = average_loss(kld, response_mask, mode=self.config.loss_avg_mode)
                         loss = pg_loss + kl_loss * self.config.kl_coef
-                        metrics["actor/kl_loss"] = kl_loss.detach().item()
-                        metrics["actor/kl_coef"] = self.config.kl_coef
+                        append_to_dict(
+                            metrics,
+                            {
+                                "actor/kl_loss": kl_loss.detach().item(),
+                                "actor/kl_coef": self.config.kl_coef,
+                            },
+                        )
                     else:
                         loss = pg_loss
 

@@ -2,6 +2,59 @@
 
 记录训练、评测、数据和工程优化的日常推进。日期按 UTC 工作区时间记录。
 
+## 2026-07-10
+
+### Eval 汇总与 Prompt 敏感性定位
+
+- 基于 `Evaluation/results/*/frames16/_summary.json` 重新生成 `docs/eval.md`，当前包含 14 个完整模型、每个模型覆盖 8 个 benchmark 和 22315 个样本。
+- 当前无具体答案示例口径下：
+  - `TimeThinker-4B-RL-Zero-100-ema-v2` Avg 为 `55.85`，仍是最高分。
+  - `TimeThinker-4B-SFT-v9-10k-3ep` Avg 为 `55.76`，只落后 `0.09`。
+  - 不能将此解释为 SFT 突然超过最强 RL；主要变化是移除固定答案示例后，SFT 不再受到严重 prompt bias。
+- 对比保留的 `Evaluation/results-v3` 样本级结果：
+  - SFT-v9 在旧模板下多选预测 `A` 的比例为 `55.91%`，而 GT 为 `A` 的比例约为 `30.75%`。
+  - 删除具体 `A` 示例后，SFT-v9 的 `A` 预测比例降为 `27.95%`，多选正确率从 `55.51%` 升至 `61.10%`。
+  - `ema-v2` 的 `A` 预测比例约 `30.69% -> 30.87%`，多选正确率基本不变；说明主榜排序变化主要来自 SFT 恢复，而不是 RL 在无示例下明显退化。
+- 检查 RL 运行配置后发现：目录名含 `v9` 的部分旧 RL run 实际仍从 `Qwen3-VL-4B-Instruct` 初始化，不能直接当作 “SFT-v9 -> RL” 的对照；后续必须以 `experiment_config.json` 中的 `worker.actor.model.model_path` 为准。
+
+### Prompt 历史记录与统一迁移
+
+- 新增 `docs/prompt-history.md`，记录以下模板的演变和适用范围：
+  - 旧 SFT / 旧 RL 的自然式模板及 answer-only 示例。
+  - 2026-07-07 后 strict RL / `eval_bench_v2.py` 的完整 `<think>/<answer>` 模板。
+  - `eval_bench_v3.py`、迁移前 `eval_bench-v4.py` 和当前统一模板。
+- 明确固定 `A`、`3.14`、`Paris` 等格式示例不是有效 few-shot：它们没有提供与当前题目配对的视觉证据和推理，却会向最终答案注入先验。
+- 新增唯一 QA prompt 定义：`scripts/prompting/timethinker.py`。
+  - 统一格式为自然式 `Respond exactly in this format:` 加完整 `<think>...</think><answer>...</answer>`。
+  - 保留按题型约束 `<answer>` 内内容的 `TYPE_TEMPLATE`。
+  - 删除具体答案示例以及 “标签前后不得出现任何文本” 的额外硬约束。
+- 当前活跃入口均复用该模板：
+  - RL：`EasyR1/verl/utils/dataset.py`
+  - 主评测：`Evaluation/Eval/eval_bench.py`
+  - 单样本 QA 推理：`Evaluation/inference_single/inference.py`
+  - 主评测 runner 默认调用 `eval_bench.py`；`eval_bench-v4.py` 保留为历史 v4 复现入口。
+- 新增 `scripts/train/normalize_timethinker_sft_prompts.py`，并已将忽略版本控制的 SFT 数据 user prompt 全部迁移：
+  - `timethinker_sft_video.json`：86217 条。
+  - `timethinker_sft_image.json`：79355 条。
+  - 共 165572 条，二次 dry-run 为 `0` 条待更新，逐条等值校验通过。
+- 保留 `eval_bench_v1.py`、`eval_bench_v2.py`、`eval_bench_v3.py` 作为历史结果复现快照；新训练和新主评测使用统一模板，不与历史榜单直接混排。
+
+### 验证
+
+- 对统一 prompt 模块、SFT 标准化脚本、RL 数据集、`eval_bench.py` 和单样本推理运行 `py_compile`，均通过。
+- `bash -n scripts/eval/run_bench.sh` 与 `git diff --check` 均通过。
+
+## 2026-07-09
+
+### 无具体答案示例的新一轮主评测
+
+- 在 `Evaluation/results` 完成 14 个模型的完整 `frames16` 主评测；所有 summary 覆盖 8 个 benchmark、22315 个样本。
+- 本轮包含此前已有的 SFT、RL、Qwen3-VL baseline，以及新增的：
+  - `TimeThinker-4B-RL-v9-100-bs16`
+  - `TimeThinker-4B-RL-Zero-100-van-bs16`
+- 评测结果写入各模型的 `_summary.json` / `_summary.md`，并记录 balanced 调度下的 `wall_time`、累计 benchmark elapsed time 与输出诊断指标。
+- 新版主评测模板移除类型示例中的固定答案，只保留 `<think>/<answer>` 指令和 answer type 约束；该结果集成为后续 prompt bias 分析和统一模板迁移的基线。
+
 ## 2026-07-08
 
 ### Eval 结果汇总与文档更新

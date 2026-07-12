@@ -58,4 +58,5 @@ PYTHONPATH="${REPO_ROOT}/LLaMA-Factory/src${PYTHONPATH:+:${PYTHONPATH}}" \
   --master_port "${MASTER_PORT}" \
   LLaMA-Factory/src/llamafactory/launcher.py \
   "${CONFIG}" \
-  "${EXTRA_ARGS[@]}"
+  "${EXTRA_ARGS[@]}" \
+  "$@"

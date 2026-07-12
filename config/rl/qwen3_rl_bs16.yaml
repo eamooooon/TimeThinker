@@ -30,6 +30,10 @@ algorithm:
   filter_key: accuracy
   filter_low: 0.01
   filter_high: 0.99
+  len_control: true
+  len_reward: 0.1
+  len_min: 180
+  len_max: 372
 
 worker:
   actor:
@@ -88,18 +92,18 @@ worker:
 
 trainer:
   total_epochs: 1
-  max_steps: 100
+  max_steps: 300
   project_name: TimeThinker
   experiment_name: rl_4b-zero-sft-v9-100-bs16
   logger: ["file", "swanlab"]
   nnodes: 1
   n_gpus_per_node: 4
   max_try_make_batch: 20  # -1 means no limit
-  val_freq: -1  # -1 to disable
+  val_freq: 50  # -1 to disable
   val_before_train: false
   val_only: false
   val_generations_to_log: 3
-  save_freq: -1  # -1 to disable
+  save_freq: 300  # -1 to disable
   save_limit: 3  # -1 to disable
   save_model_only: false
   save_checkpoint_path: models/TimeThinker-4B-RL-Zero-sft-v9-100-bs16

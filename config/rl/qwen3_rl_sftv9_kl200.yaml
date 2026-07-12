@@ -9,9 +9,9 @@ data:
   video_fps: 2.0
   max_prompt_length: 16384
   max_response_length: 768
-  rollout_batch_size: 32
+  rollout_batch_size: 16
   mini_rollout_batch_size: null
-  val_batch_size: 32
+  val_batch_size: 16
   format_prompt: null
   override_chat_template: null
   shuffle: true
@@ -22,27 +22,25 @@ data:
 
 algorithm:
   adv_estimator: grpo
-  disable_kl: true
+  # A reference policy is required for use_kl_loss. Keeping disable_kl=true
+  # silently disables the reference worker and makes kl_coef ineffective.
+  disable_kl: false
   use_kl_loss: true
   kl_penalty: low_var_kl
-  kl_coef: 4.0e-2
+  kl_coef: 1.0e-2
   online_filtering: true
   filter_key: accuracy
   filter_low: 0.01
   filter_high: 0.99
-  temporal: true
-  shuffled_rollout_ratio: 0.5  # Video-R1: shuffled generations = G / 2
-  temporal_reward: 0.3
-  temporal_compare_ratio: 0.8  # follows Video-R1 source implementation
-  temporal_correct_threshold: 0.1
-  len_control: false
-  len_reward: 0.2
-  len_min: 320
-  len_max: 512
+  temporal: false
+  len_control: true
+  len_reward: 0.02
+  len_min: 180
+  len_max: 372
 
 worker:
   actor:
-    global_batch_size: 32
+    global_batch_size: 16
     micro_batch_size_per_device_for_update: 1
     micro_batch_size_per_device_for_experience: 1
     max_grad_norm: 5.0
@@ -50,7 +48,7 @@ worker:
     dynamic_batching: true
     ulysses_size: 1
     model:
-      model_path: Qwen/Qwen3-VL-4B-Instruct
+      model_path: models/TimeThinker-4B-SFT-v9-10k-canonical
       enable_gradient_checkpointing: true
       trust_remote_code: true
       freeze_vision_tower: false
@@ -72,15 +70,15 @@ worker:
     temperature: 1.0
     top_p: 1.0
     limit_images: 0
-    gpu_memory_utilization: 0.7
+    gpu_memory_utilization: 0.65
     enforce_eager: false
     enable_chunked_prefill: false
     tensor_parallel_size: 4
     disable_tqdm: true
     max_num_batched_tokens: 20480
     val_override_config:
-      temperature: 0.7
-      top_p: 0.95
+      temperature: 0.0
+      top_p: 1.0
       n: 1
 
   ref:
@@ -89,28 +87,32 @@ worker:
       enable_cpu_offload: false
       enable_rank0_init: true
     offload:
-      offload_params: false
+      # CPU RAM is plentiful; offload the reference model to leave headroom
+      # for rollout KV cache and avoid an avoidable startup OOM.
+      offload_params: true
 
   reward:
     reward_type: batch
     reward_function: EasyR1/verl/reward_function/timethinker_reward.py:compute_score
+    reward_function_kwargs:
+      format_weight: 0.05
 
 trainer:
   total_epochs: 1
-  max_steps: 100
+  max_steps: 200
   project_name: TimeThinker
-  experiment_name: rl_4b-zero-tgrpo-van2-100
+  experiment_name: rl_4b-sftv9-kl01-len02-bs16-200
   logger: ["file", "swanlab"]
   nnodes: 1
   n_gpus_per_node: 4
   max_try_make_batch: 20
-  val_freq: -1
-  val_before_train: false
+  val_freq: 25
+  val_before_train: true
   val_only: false
   val_generations_to_log: 3
   save_freq: 50
-  save_limit: 3
+  save_limit: 2
   save_model_only: false
-  save_checkpoint_path: models/TimeThinker-4B-RL-Zero-100-tgrpo-van2
+  save_checkpoint_path: models/TimeThinker-4B-RL-sftv9-kl01-len02-bs16-200
   load_checkpoint_path: null
-  find_last_checkpoint: true
+  find_last_checkpoint: false

@@ -1,134 +1,133 @@
 # Evaluation Summary
 
-记录 `Evaluation/results/*/frames16` 当前统一评测结果、耗时和输出稳定性。分数均直接读取各模型的 `_summary.json`，默认使用 8 个 benchmark 的 `answer_acc` 简单平均。
+记录 `Evaluation/results/<model>/frames16/_summary.json` 中的 canonical prompt 评测结果。本文只统计该目录下现有的完整 run，不与 `Evaluation/results-v4` 的历史 v4 prompt 结果混排。
 
 ## 结果口径
 
-- `Avg`：8 个 benchmark 的 `answer_acc` 未加权平均，即 `_summary.json` 中的 `macro_avg/by_benchmark`。
-- `wall_time`：一个模型完整评测的实际等待时间。
-- `benchmark_elapsed_sum`：8 个 benchmark 各自记录的 `elapsed_min` 之和，表示累计 workload/GPU task time，不等于实际等待时间。
-- `frames16`：所有结果均为 `MAX_FRAMES=16`。
-- `answer_acc` 只统计最终答案是否正确；输出格式问题通过 `extract_rate`、`invalid_rate` 和 `trunc_rate` 单独观察。
-- 当前共有 14 个完整 summary，每个 summary 覆盖 8 个 benchmark、总样本数均为 22315。
-- 本文只统计当前 `Evaluation/results` 中实际存在的结果，不混入旧目录或历史文档中的已删除 run。
+- Prompt：使用 `Evaluation/Eval/eval_bench.py` 和 `scripts/prompting/timethinker.py` 的 canonical QA 模板。
+- `Avg`：8 个 benchmark 的 `answer_acc` 未加权平均，即 `_summary.json` 的 `macro_avg/by_benchmark`。
+- `六项 Avg（去除 LongVideoReason、VideoMathQA）`：其余 6 个 benchmark 的 `answer_acc` 未加权平均。
+- `answer_acc`：只判断最终答案正确性；格式服从情况通过 `extract_rate`、`invalid_rate`、`trunc_rate` 单独诊断。
+- `frames16`：所有 run 都使用 `MAX_FRAMES=16`，共 8 个 benchmark、22,315 条样本。
+- `wall_time`：单模型的实际等待时间；`benchmark_elapsed_sum` 为 8 个 GPU task 时间之和，因此不等于 wall time。
+- 所有帧均命中已有 frame cache；本轮结果没有 frame decode fallback。
 
 ## 最新完整结果
 
-| Model | Avg | LongVideoReason | MMVU | MVBench | TempCompass | VideoMathQA | VideoMME | VideoMMMU | VSIBench |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `TimeThinker-4B-RL-Zero-100-ema-v2` | **55.85** | 70.30 | 64.80 | 61.12 | 72.55 | 23.81 | **55.56** | 52.78 | **45.87** |
-| `TimeThinker-4B-SFT-v9-10k-3ep` | 55.76 | **71.50** | 65.44 | **63.38** | 69.10 | 24.52 | 55.15 | 52.89 | 44.12 |
-| `TimeThinker-4B-RL-Zero-100-tgrpo-van2` | 55.54 | 68.40 | 65.44 | 61.20 | 72.39 | 24.29 | 55.26 | 52.00 | 45.34 |
-| `TimeThinker-4B-RL-Zero-100-van-v2` | 55.40 | 66.80 | **66.24** | 61.58 | 72.89 | 23.10 | 54.00 | 53.11 | 45.50 |
-| `TimeThinker-4B-SFT-v3-10000` | 54.89 | 69.10 | 63.68 | 62.80 | 68.71 | 22.14 | 54.89 | **53.67** | 44.11 |
-| `TimeThinker-4B-RL-Zero-100-van-bs16` | 54.83 | 68.40 | 65.76 | 61.52 | 72.68 | 20.48 | 54.07 | 51.11 | 44.65 |
-| `TimeThinker-4B-RL-v9-100-bs16` | 54.81 | 67.40 | 64.00 | 60.55 | 73.05 | 24.29 | 52.93 | 51.00 | 45.25 |
-| `TimeThinker-4B-SFT-v10-50k` | 54.48 | 67.30 | 62.40 | 62.45 | 68.29 | **26.67** | 54.52 | 52.67 | 41.58 |
-| `TimeThinker-4B-SFT-v8-10k` | 54.36 | 70.30 | 63.52 | 62.58 | 68.00 | 23.33 | 53.89 | 51.22 | 42.03 |
-| `TimeThinker-4B-SFT-v3-10000-1ep` | 54.34 | 69.20 | 63.84 | 62.18 | 67.92 | 24.52 | 53.00 | 52.44 | 41.62 |
-| `TimeThinker-4B-SFT-v5-10k` | 54.07 | 69.60 | 62.08 | 62.10 | 67.81 | 23.33 | 54.04 | 51.00 | 42.62 |
-| `Qwen3-VL-4B-Instruct` | 53.56 | 65.50 | 64.48 | 60.65 | 71.72 | 19.76 | 52.07 | 50.11 | 44.19 |
-| `TimeThinker-4B-SFT-v4-10000` | 53.52 | 69.30 | 63.84 | 60.52 | 67.63 | 20.48 | 53.81 | 51.00 | 41.61 |
-| `Qwen3-VL-4B-Thinking` | 49.20 | 61.30 | 56.64 | 60.48 | **74.36** | 18.57 | 52.89 | 36.00 | 33.37 |
+| Model | Avg | 六项 Avg（去除 LongVideoReason、VideoMathQA） | LongVideoReason | MMVU | MVBench | TempCompass | VideoMathQA | VideoMME | VideoMMMU | VSIBench |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `TimeThinker-4B-RL-bs16-v9-van-500-new` | **57.77** | **60.77** | **71.60** | 66.24 | **66.05** | 70.76 | 25.95 | 57.48 | 52.56 | **51.50** |
+| `TimeThinker-4B-RL-bs16-van-500-new` | 57.56 | 60.28 | 71.20 | 65.60 | 64.73 | **72.75** | **27.62** | **58.70** | 53.44 | 46.44 |
+| `TimeThinker-4B-SFT-v9-10k-canonical` | 56.43 | 59.15 | 70.30 | **66.40** | 62.70 | 68.78 | 26.19 | 55.19 | 54.11 | 47.74 |
+| `TimeThinker-4B-RL-bs16-van-100-new` | 55.66 | 59.35 | 68.70 | 64.48 | 62.18 | 72.52 | 20.48 | 54.63 | 51.44 | **50.86** |
+| `TimeThinker-4B-SFT-v8-10k-canonical` | 54.46 | 57.22 | 67.60 | 62.56 | 62.18 | 68.26 | 24.76 | 54.11 | 51.22 | 44.99 |
+| `TimeThinker-4B-SFT-v6-10k-canonical` | 54.25 | 56.94 | 70.70 | 60.64 | 61.12 | 67.20 | 21.67 | 54.22 | **54.33** | 44.10 |
+| `TimeThinker-4B-SFT-v5-10k-canonical` | 54.14 | 56.95 | 70.50 | 62.08 | 61.68 | 67.80 | 20.95 | 53.67 | 52.44 | 44.02 |
+| `TimeThinker-4B-SFT-v7-10k-canonical` | 53.52 | 56.59 | 69.80 | 63.04 | 61.70 | 67.19 | 18.81 | 53.04 | 50.89 | 43.70 |
+| `Qwen3-VL-4B-Instruct` | 50.53 | 54.46 | 57.20 | 60.16 | 56.85 | 66.25 | 20.24 | 45.85 | 50.67 | 47.00 |
+| `Qwen3-VL-4B-Thinking` | 49.01 | 52.98 | 55.20 | 59.36 | 60.70 | 68.61 | 19.05 | 50.44 | 41.44 | 37.30 |
 
-## SFT 结果
+`TimeThinker-4B-RL-bs16-v9-van-500-new` 使用
+`models/TimeThinker-4B-RL-bs16-v9-van-500-new/global_step_300/actor/huggingface`。
+8 个结果 JSON 均已写入；启动脚本在生成 `_summary` 前中断，因此本表根据这 8 个结果文件重建，未记录可靠的本轮 `wall_time`。
 
-| Model | Avg | LongVideoReason | MMVU | MVBench | TempCompass | VideoMathQA | VideoMME | VideoMMMU | VSIBench |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `TimeThinker-4B-SFT-v9-10k-3ep` | **55.76** | **71.50** | **65.44** | **63.38** | **69.10** | 24.52 | **55.15** | 52.89 | **44.12** |
-| `TimeThinker-4B-SFT-v3-10000` | 54.89 | 69.10 | 63.68 | 62.80 | 68.71 | 22.14 | 54.89 | **53.67** | 44.11 |
-| `TimeThinker-4B-SFT-v10-50k` | 54.48 | 67.30 | 62.40 | 62.45 | 68.29 | **26.67** | 54.52 | 52.67 | 41.58 |
-| `TimeThinker-4B-SFT-v8-10k` | 54.36 | 70.30 | 63.52 | 62.58 | 68.00 | 23.33 | 53.89 | 51.22 | 42.03 |
-| `TimeThinker-4B-SFT-v3-10000-1ep` | 54.34 | 69.20 | 63.84 | 62.18 | 67.92 | 24.52 | 53.00 | 52.44 | 41.62 |
-| `TimeThinker-4B-SFT-v5-10k` | 54.07 | 69.60 | 62.08 | 62.10 | 67.81 | 23.33 | 54.04 | 51.00 | 42.62 |
-| `TimeThinker-4B-SFT-v4-10000` | 53.52 | 69.30 | 63.84 | 60.52 | 67.63 | 20.48 | 53.81 | 51.00 | 41.61 |
+## 训练模型结果
 
-## RL 结果
+| Model | Avg | 相对 canonical SFT v5 |
+|---|---:|---:|
+| `TimeThinker-4B-RL-bs16-v9-van-500-new` | **57.77** | +3.63 |
+| `TimeThinker-4B-RL-bs16-van-500-new` | 57.56 | +3.42 |
+| `TimeThinker-4B-SFT-v9-10k-canonical` | 56.43 | +2.29 |
+| `TimeThinker-4B-RL-bs16-van-100-new` | 55.66 | +1.52 |
+| `TimeThinker-4B-SFT-v8-10k-canonical` | 54.46 | +0.32 |
+| `TimeThinker-4B-SFT-v6-10k-canonical` | 54.25 | +0.11 |
+| `TimeThinker-4B-SFT-v5-10k-canonical` | 54.14 | — |
+| `TimeThinker-4B-SFT-v7-10k-canonical` | 53.52 | -0.62 |
 
-| Model | Avg | LongVideoReason | MMVU | MVBench | TempCompass | VideoMathQA | VideoMME | VideoMMMU | VSIBench |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `TimeThinker-4B-RL-Zero-100-ema-v2` | **55.85** | **70.30** | 64.80 | 61.12 | 72.55 | 23.81 | **55.56** | 52.78 | **45.87** |
-| `TimeThinker-4B-RL-Zero-100-tgrpo-van2` | 55.54 | 68.40 | 65.44 | 61.20 | 72.39 | **24.29** | 55.26 | 52.00 | 45.34 |
-| `TimeThinker-4B-RL-Zero-100-van-v2` | 55.40 | 66.80 | **66.24** | **61.58** | 72.89 | 23.10 | 54.00 | **53.11** | 45.50 |
-| `TimeThinker-4B-RL-Zero-100-van-bs16` | 54.83 | 68.40 | 65.76 | 61.52 | 72.68 | 20.48 | 54.07 | 51.11 | 44.65 |
-| `TimeThinker-4B-RL-v9-100-bs16` | 54.81 | 67.40 | 64.00 | 60.55 | **73.05** | **24.29** | 52.93 | 51.00 | 45.25 |
+RL v9 500 是当前总分最高模型，并在 LongVideoReason、MVBench、VSIBench 三项最佳；此前的 RL 500 仍保持 TempCompass、VideoMathQA、VideoMME 最好。v9 SFT 保持 MMVU 最好，v6 SFT 保持 VideoMMMU 最好。RL v9 500 相较 canonical SFT v5 总分提升 3.63 点、相较此前 RL 500 再提升 0.21 点。
 
 ## Baseline 结果
 
-| Model | Avg | LongVideoReason | MMVU | MVBench | TempCompass | VideoMathQA | VideoMME | VideoMMMU | VSIBench |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `Qwen3-VL-4B-Instruct` | **53.56** | **65.50** | **64.48** | **60.65** | 71.72 | **19.76** | 52.07 | **50.11** | **44.19** |
-| `Qwen3-VL-4B-Thinking` | 49.20 | 61.30 | 56.64 | 60.48 | **74.36** | 18.57 | **52.89** | 36.00 | 33.37 |
+| Model | Avg | 相对 RL v9 500 |
+|---|---:|---:|
+| `Qwen3-VL-4B-Instruct` | 50.53 | -7.24 |
+| `Qwen3-VL-4B-Thinking` | 49.01 | -8.76 |
+
+`Qwen3-VL-4B-Instruct` 已有稳定的基线能力，但在 VideoMME 和 LongVideoReason 上与训练模型差距较大。`Qwen3-VL-4B-Thinking` 在 TempCompass（68.61）和 MVBench（60.70）不弱，但长输出使整体效率和答案稳定性明显下降。
 
 ## 评测耗时
 
-| Model | wall_time | benchmark_elapsed_sum | schedule |
+| Model | wall_time | benchmark_elapsed_sum | Schedule |
 |---|---:|---:|---|
-| `TimeThinker-4B-RL-Zero-100-ema-v2` | 28m53s | 110.5 min | balanced |
-| `TimeThinker-4B-SFT-v9-10k-3ep` | 28m21s | 103.9 min | balanced |
-| `TimeThinker-4B-RL-Zero-100-tgrpo-van2` | 29m06s | 111.3 min | balanced |
-| `TimeThinker-4B-RL-Zero-100-van-v2` | 35m45s | 130.7 min | balanced |
-| `TimeThinker-4B-SFT-v3-10000` | 29m31s | 108.7 min | balanced |
-| `TimeThinker-4B-RL-Zero-100-van-bs16` | 30m40s | 116.4 min | balanced |
-| `TimeThinker-4B-RL-v9-100-bs16` | 36m31s | 132.9 min | balanced |
-| `TimeThinker-4B-SFT-v10-50k` | 28m53s | 107.2 min | balanced |
-| `TimeThinker-4B-SFT-v8-10k` | 29m24s | 108.1 min | balanced |
-| `TimeThinker-4B-SFT-v3-10000-1ep` | 32m41s | 119.3 min | balanced |
-| `TimeThinker-4B-SFT-v5-10k` | 31m33s | 117.1 min | balanced |
-| `Qwen3-VL-4B-Instruct` | 32m18s | 121.9 min | balanced |
-| `TimeThinker-4B-SFT-v4-10000` | 32m17s | 116.4 min | balanced |
-| `Qwen3-VL-4B-Thinking` | 51m57s | 171.3 min | balanced |
+| `TimeThinker-4B-RL-bs16-v9-van-500-new` | 未记录（收尾中断） | 130.3m | balanced |
+| `TimeThinker-4B-RL-bs16-van-500-new` | 37m30s | 134.9m | balanced |
+| `TimeThinker-4B-SFT-v9-10k-canonical` | 37m11s | 131.6m | balanced |
+| `TimeThinker-4B-RL-bs16-van-100-new` | 33m32s | 121.2m | balanced |
+| `TimeThinker-4B-SFT-v8-10k-canonical` | 40m33s | 143.6m | balanced |
+| `TimeThinker-4B-SFT-v6-10k-canonical` | 41m32s | 140.0m | balanced |
+| `TimeThinker-4B-SFT-v5-10k-canonical` | 37m11s | 133.0m | balanced |
+| `TimeThinker-4B-SFT-v7-10k-canonical` | 44m04s | 154.6m | balanced |
+| `Qwen3-VL-4B-Instruct` | 34m45s | 121.3m | balanced |
+| `Qwen3-VL-4B-Thinking` | 51m22s | 169.1m | balanced |
 
 ## 每项最优
 
-| Benchmark | Best overall | Acc | Best SFT | Acc |
-|---|---|---:|---|---:|
-| LongVideoReason | `TimeThinker-4B-SFT-v9-10k-3ep` | 71.50 | `TimeThinker-4B-SFT-v9-10k-3ep` | 71.50 |
-| MMVU | `TimeThinker-4B-RL-Zero-100-van-v2` | 66.24 | `TimeThinker-4B-SFT-v9-10k-3ep` | 65.44 |
-| MVBench | `TimeThinker-4B-SFT-v9-10k-3ep` | 63.38 | `TimeThinker-4B-SFT-v9-10k-3ep` | 63.38 |
-| TempCompass | `Qwen3-VL-4B-Thinking` | 74.36 | `TimeThinker-4B-SFT-v9-10k-3ep` | 69.10 |
-| VideoMathQA | `TimeThinker-4B-SFT-v10-50k` | 26.67 | `TimeThinker-4B-SFT-v10-50k` | 26.67 |
-| VideoMME | `TimeThinker-4B-RL-Zero-100-ema-v2` | 55.56 | `TimeThinker-4B-SFT-v9-10k-3ep` | 55.15 |
-| VideoMMMU | `TimeThinker-4B-SFT-v3-10000` | 53.67 | `TimeThinker-4B-SFT-v3-10000` | 53.67 |
-| VSIBench | `TimeThinker-4B-RL-Zero-100-ema-v2` | 45.87 | `TimeThinker-4B-SFT-v9-10k-3ep` | 44.12 |
+| Benchmark | Best model | Acc |
+|---|---|---:|
+| LongVideoReason | `TimeThinker-4B-RL-bs16-v9-van-500-new` | 71.60 |
+| MMVU | `TimeThinker-4B-SFT-v9-10k-canonical` | 66.40 |
+| MVBench | `TimeThinker-4B-RL-bs16-v9-van-500-new` | 66.05 |
+| TempCompass | `TimeThinker-4B-RL-bs16-van-500-new` | 72.75 |
+| VideoMathQA | `TimeThinker-4B-RL-bs16-van-500-new` | 27.62 |
+| VideoMME | `TimeThinker-4B-RL-bs16-van-500-new` | 58.70 |
+| VideoMMMU | `TimeThinker-4B-SFT-v6-10k-canonical` | 54.33 |
+| VSIBench | `TimeThinker-4B-RL-bs16-v9-van-500-new` | 51.50 |
 
 ## 输出稳定性
 
-以下指标按样本数加权，避免不同 benchmark 样本规模差异影响汇总。
+以下指标按样本数加权。
 
 | Model | weighted avg_tokens | weighted trunc_rate | weighted invalid_rate | weighted extract_rate |
 |---|---:|---:|---:|---:|
-| `TimeThinker-4B-RL-Zero-100-ema-v2` | 139.3 | 2.56% | 1.43% | 98.57% |
-| `TimeThinker-4B-SFT-v9-10k-3ep` | 230.0 | 0.13% | 0.05% | 99.95% |
-| `TimeThinker-4B-RL-Zero-100-tgrpo-van2` | 137.8 | 2.71% | 1.55% | 98.45% |
-| `TimeThinker-4B-RL-Zero-100-van-v2` | 160.2 | 3.28% | 1.62% | 98.38% |
-| `TimeThinker-4B-SFT-v3-10000` | 231.3 | 0.19% | 0.05% | 99.95% |
-| `TimeThinker-4B-RL-Zero-100-van-bs16` | 148.9 | 2.25% | 1.19% | 98.81% |
-| `TimeThinker-4B-RL-v9-100-bs16` | 171.6 | 4.08% | 2.14% | 97.86% |
-| `TimeThinker-4B-SFT-v10-50k` | 228.2 | 0.31% | 0.15% | 99.85% |
-| `TimeThinker-4B-SFT-v8-10k` | 227.3 | 0.50% | 0.16% | 99.84% |
-| `TimeThinker-4B-SFT-v3-10000-1ep` | 234.2 | 0.50% | 0.22% | 99.78% |
-| `TimeThinker-4B-SFT-v5-10k` | 229.0 | 0.33% | 0.14% | 99.86% |
-| `Qwen3-VL-4B-Instruct` | 179.9 | 5.28% | 2.40% | 97.60% |
-| `TimeThinker-4B-SFT-v4-10000` | 236.4 | 0.54% | 0.20% | 99.80% |
-| `Qwen3-VL-4B-Thinking` | 598.2 | 37.25% | 4.75% | 95.25% |
+| `TimeThinker-4B-RL-bs16-v9-van-500-new` | 211.2 | 0.04% | 0.03% | 99.97% |
+| `TimeThinker-4B-RL-bs16-van-500-new` | 209.3 | 0.07% | 0.05% | 99.95% |
+| `TimeThinker-4B-SFT-v9-10k-canonical` | 230.2 | 0.17% | 0.08% | 99.92% |
+| `TimeThinker-4B-RL-bs16-van-100-new` | 87.2 | 2.09% | 1.44% | 98.56% |
+| `TimeThinker-4B-SFT-v8-10k-canonical` | 225.6 | 0.52% | 0.17% | 99.83% |
+| `TimeThinker-4B-SFT-v6-10k-canonical` | 227.3 | 0.34% | 0.14% | 99.86% |
+| `TimeThinker-4B-SFT-v5-10k-canonical` | 226.3 | 0.35% | 0.18% | 99.82% |
+| `TimeThinker-4B-SFT-v7-10k-canonical` | 227.1 | 0.32% | 0.15% | 99.85% |
+| `Qwen3-VL-4B-Instruct` | 100.2 | 3.20% | 5.46% | 94.54% |
+| `Qwen3-VL-4B-Thinking` | 487.9 | 26.32% | 3.57% | 96.43% |
+
+RL v9 500 的格式稳定性最好：加权提取率 99.97%，截断率和无效率分别仅 0.04% 与 0.03%。相较 RL 100，它的输出更长（211.2 vs. 87.2 tokens），但 VideoMathQA 的截断率从 34.29% 降至 1.43%、无效率从 19.76% 降至 0.95%。Thinking baseline 的加权截断率达到 26.32%，不宜在当前 `max_tokens=1024` 设定下直接以总分判断其能力。
 
 ## 当前观察
 
-- `ema-v2` 当前总分最高，Avg 55.85；但只领先最强 SFT `v9-10k-3ep` 0.09 点，二者整体能力非常接近。
-- `v9-10k-3ep` 是当前最强 SFT，并取得 LongVideoReason 和 MVBench 全局第一；它的输出提取率为 99.95%，稳定性也明显优于 RL 模型。
-- RL 组内部 `ema-v2` 最强，领先 `tgrpo-van2` 0.31 点；当前结果仍不足以证明 temporal/T-GRPO 配置稳定优于 EMA-GRPO 对照。
-- `van-bs16` Avg 54.83，比 `van-v2` 低 0.57 点；仅从这次完整评测看，增大 batch size 没有带来总体收益，VideoMathQA 下降最明显。
-- 以 `v9-10k-3ep` 初始化的 `RL-v9-100-bs16` Avg 54.81，比其 SFT 起点低 0.95 点。它在 TempCompass 和 VSIBench 上上涨，但 LongVideoReason、MVBench、VideoMME、VideoMMMU 均下降。
-- `v10-50k` 的 Avg 为 54.48，低于 `v9-10k-3ep` 1.28 点；不过 VideoMathQA 达到全局最高 26.67，说明扩大数据量可能强化了部分数学视频能力，但没有转化为整体最优。
-- `Qwen3-VL-4B-Instruct` Avg 53.56，接近较弱 SFT，但仍低于其余主要 SFT/RL run；其截断率和无效答案率也高于所有 SFT。
-- `Qwen3-VL-4B-Thinking` 在 TempCompass 达到全局最高 74.36，但 Avg 只有 49.20。其平均输出 598.2 tokens、截断率 37.25%，当前输出长度和答案协议明显限制了整体表现。
-- VideoMathQA 仍是所有模型共同短板，当前最高仅 26.67；后续优化应重点分析数学答案提取、视频条件利用和专项训练数据。
+- RL v9 500 是当前 `Evaluation/results` 中的最佳总分模型，Avg 为 57.77，较此前 RL 500 高 0.21 点、较 canonical SFT v9 高 1.34 点、较 RL 100 高 2.11 点。
+- 去除 LongVideoReason 和 VideoMathQA 后，RL v9 500 的六项 Avg 为 60.77，较此前 RL 500 高 0.49 点、较 canonical SFT v9 高 1.62 点。
+- v8 是新增 v6–v8 中总分最高的模型（54.46），较 v5 高 0.32 点，但仍低于 v9 1.97 点；其 VideoMathQA（24.76）和 VSIBench（44.99）优于 v5。
+- RL v9 500 在 LongVideoReason、MVBench、VSIBench 取得当前最优；此前 RL 500 在 TempCompass、VideoMathQA、VideoMME 仍然最好，v9 SFT 保持 MMVU 最优，v6 SFT 保持 VideoMMMU 最优。
+- VideoMathQA 仍是所有模型的最弱项目；RL v9 500 的 25.95 低于此前 RL 500 的 27.62，但其低截断率与无效率表明差异不是主要由格式或答案抽取造成。
+- v6 的 VideoMMMU（54.33）和 v9 的 MMVU（66.40）仍是 RL 500 未覆盖的优势项目，应作为后续 RL 对照的重点。
 
 ## 下一步建议
 
-1. 主线模型优先保留 `ema-v2` 和 `v9-10k-3ep`，前者作为当前最高 Avg，后者作为最强且最稳定的 SFT 起点。
-2. 对 `RL-v9-100-bs16` 做逐 benchmark 和 bad case 对比，确认 RL 后 LongVideoReason、MVBench、VideoMME、VideoMMMU 回退的原因。
-3. 对 batch-size 消融继续保持相同 checkpoint、采样参数和随机种子；当前单次结果不支持 `bs16` 优于原配置。
-4. 单独分析 `v10-50k` 在 VideoMathQA 上的收益来源，判断能否通过数据混合或专项 curriculum 保留该收益，同时恢复 VSIBench 等项目。
-5. Thinking 模型应调整 `max_new_tokens`、stop 条件或答案提取协议后再比较，否则 37.25% 的截断率会显著污染结论。
+1. 以 `TimeThinker-4B-RL-bs16-v9-van-500-new` 作为当前总分最佳候选，同时保留此前 RL 500 作为 TempCompass、VideoMathQA、VideoMME 的对照，v9 SFT 作为 MMVU、v6 SFT 作为 VideoMMMU 的对照。
+2. 对两个 RL 500 run 做逐 benchmark 和 case study，重点解释 RL v9 500 在 MVBench/VSIBench 的收益以及在 TempCompass/VideoMathQA/VideoMME 的回退。
+3. 以 RL v9 500 为初始化 checkpoint 复训或对照 RL，重点验证能否保留其三项新增收益，同时恢复 TempCompass、VideoMathQA、VideoMME 的优势。
+4. 对 Thinking baseline 可单独提高 `MAX_TOKENS` 后复跑，避免 26.32% 的截断率混入模型能力比较。
+
+## Evaluator and prompt history
+
+`Evaluation/Eval/eval_bench.py` is the only active evaluator. It is the default in `scripts/eval/run_bench.sh` and imports the canonical QA prompt from `scripts/prompting/timethinker.py`.
+
+| Version | Prompt regime | Material behavior | Historical result scope |
+|---|---|---|---|
+| v1 | Natural instruction with fixed answer examples such as `A`, `3.14`, and `Paris` | Basic `<answer>` extraction and accuracy | `Evaluation/results-v1-rerun/` only |
+| v2 | Strict full `<think>...</think><answer>...</answer>` contract; still fixed examples | Added robust multiple-choice/numeric extraction, validity, extract/invalid/truncation diagnostics, category metrics, bootstrap CI, and `--rescore_existing` | Strict-prompt history only |
+| v3 | Natural outer instruction; retained v2 examples | Same v2 scoring and diagnostics | Prompt-ablation history only |
+| v4 | Natural instruction with no concrete answer examples | Same v2/v3 scoring and diagnostics | `Evaluation/results-v4/` only |
+| canonical (current) | Shared template with no fixed answer examples | Mature v2+ scoring; one prompt implementation shared by SFT, RL, eval, and inference | `Evaluation/results/` only |
+
+Do not mix scores across result roots/prompt regimes. Fixed type-specific examples were not valid few-shot demonstrations: they supplied answer priors without task-specific visual evidence and measurably biased multiple-choice predictions. The old source snapshots were removed after this record was consolidated; historical JSON and markdown reports remain in [archive/](archive/README.md). If exact old code is ever needed, restore it from the Git revision before the cleanup instead of creating another `eval_bench_v*.py` copy.

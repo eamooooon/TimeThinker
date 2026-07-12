@@ -19,6 +19,7 @@ import os
 import json
 import hashlib
 import shutil
+import sys
 from collections import defaultdict
 from io import BytesIO
 from pathlib import Path
@@ -35,55 +36,18 @@ from qwen_vl_utils.vision_process import fetch_video
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.prompting.timethinker import QUESTION_TEMPLATE, TYPE_TEMPLATE
+
 from . import torch_functional as VF
 
 
 RL_FRAME_CACHE_VERSION = 1
 RL_FRAME_CACHE_IMAGE_EXT = "jpg"
 RL_FRAME_CACHE_JPEG_QUALITY = 95
-
-QUESTION_TEMPLATE = (
-    "{Question}\n"
-    "Please answer this question based on the visual content.\n"
-    "Your entire response must follow exactly this structure:\n"
-    "<think>\n"
-    "Your reasoning here.\n"
-    "</think>\n"
-    "<answer>\n"
-    "Your final answer here.\n"
-    "</answer>\n"
-    "Do not write anything before <think> or after </answer>.\n"
-)
-
-TYPE_TEMPLATE = {
-    "multiple choice": (
-        "The final answer inside <answer> must be only the single option letter "
-        "(e.g., A, B, C, D, etc.).\n"
-        "Example:\n<think>The correct option is A.</think>\n<answer>A</answer>"
-    ),
-    "numerical": (
-        "The final answer inside <answer> must be only the numerical value.\n"
-        "Example:\n<think>Compute the requested value.</think>\n<answer>3.14</answer>"
-    ),
-    "OCR": (
-        "The final answer inside <answer> must be only the transcribed text.\n"
-        "Example:\n<think>Read the visible text.</think>\n<answer>Hello World</answer>"
-    ),
-    "open-ended": (
-        "The final answer inside <answer> must be only your concise text answer.\n"
-        "Example:\n<think>Identify the requested fact.</think>\n<answer>The capital of France is Paris.</answer>"
-    ),
-    "regression": (
-        "The final answer inside <answer> must be only the numerical value.\n"
-        "Example:\n<think>Estimate the target value.</think>\n<answer>42.7</answer>"
-    ),
-    "math": (
-        "The final answer inside <answer> must be only the final result "
-        "(a number or LaTeX formula).\n"
-        "Example:\n<think>Solve the expression.</think>\n<answer>$$-\\dfrac{3}{2}$$</answer>"
-    )
-}
-
 
 def collate_fn(features: list[dict[str, Any]]) -> dict[str, Any]:
     tensors = defaultdict(list)

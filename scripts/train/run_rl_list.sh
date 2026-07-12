@@ -15,11 +15,13 @@ run_one() {
   local name="$1"
   local adv_estimator="$2"
   local ckpt_path="$3"
-  shift 3
+  local base_model_path="$4"
+  shift 4
   local log_path="${LOG_DIR}/${name}.log"
 
   echo "[START] ${name}"
   echo "[CONFIG] ${CONFIG}"
+  echo "[BASE_MODEL] ${base_model_path}"
   echo "[CKPT] ${ckpt_path}"
   echo "[LOG] ${log_path}"
 
@@ -27,6 +29,7 @@ run_one() {
   PYTHON="$PYTHON" \
   CONFIG="$CONFIG" \
   bash scripts/train/run_rl.sh \
+    "worker.actor.model.model_path=${base_model_path}" \
     "algorithm.adv_estimator=${adv_estimator}" \
     "trainer.experiment_name=${name}" \
     "trainer.save_checkpoint_path=${ckpt_path}" \
@@ -45,33 +48,37 @@ run_one() {
 }
 
 # run_one \
-#   "rl_4b-bs16-van-100" \
+#   "rl_4b-bs16-v9-van-500-new" \
 #   "grpo" \
-#   "models/TimeThinker-4B-RL-bs16-van-100" \
+#   "models/TimeThinker-4B-RL-bs16-v9-van-500-new" \
+#   "models/TimeThinker-4B-SFT-v9-10k-canonical" \
 #   "algorithm.temporal=false" || exit $?
 
 run_one \
-  "rl_4b-bs16-tgrpo-diagnose-100" \
+  "rl_4b-bs16-tgrpo-diagnose-300" \
   "grpo" \
-  "models/TimeThinker-4B-RL-bs16-tgrpo-diagnose-100" \
+  "models/TimeThinker-4B-RL-bs16-tgrpo-diagnose-300" \
+  "Qwen/Qwen3-VL-4B-Instruct" \
   "algorithm.temporal=true" \
   "algorithm.shuffled_rollout_ratio=0.5" \
   "algorithm.temporal_reward=0.3" \
   "algorithm.temporal_compare_ratio=0.8" || exit $?
 
 run_one \
-  "rl_4b-bs16-tgrpo-strict-r01-100" \
+  "rl_4b-bs16-tgrpo-strict-r01-300" \
   "grpo" \
-  "models/TimeThinker-4B-RL-bs16-tgrpo-strict-r01-100" \
+  "models/TimeThinker-4B-RL-bs16-tgrpo-strict-r01-300" \
+  "Qwen/Qwen3-VL-4B-Instruct" \
   "algorithm.temporal=true" \
   "algorithm.shuffled_rollout_ratio=0.5" \
   "algorithm.temporal_reward=0.1" \
   "algorithm.temporal_compare_ratio=1.0" || exit $?
 
-run_one \
-  "rl_4b-bs16-ema-100" \
-  "ema_grpo" \
-  "models/TimeThinker-4B-RL-bs16-ema-100" \
-  "algorithm.temporal=false" || exit $?
+# run_one \
+#   "rl_4b-bs16-ema-200" \
+#   "ema_grpo" \
+#   "models/TimeThinker-4B-RL-bs16-ema-200" \
+#   "Qwen/Qwen3-VL-4B-Instruct" \
+#   "algorithm.temporal=false" || exit $?
 
 echo "[ALL DONE] runs finished."

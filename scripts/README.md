@@ -4,9 +4,11 @@ This directory contains project-level entry points. Framework source trees such
 as `LLaMA-Factory/`, `EasyR1/`, and `Evaluation/` are kept mostly as upstream
 code plus configuration.
 
-- `data/`: data conversion and preprocessing scripts.
+- `data/`: Video-R1 download, conversion, split, and preprocessing scripts.
 - `train/`: runnable training entry points and project-specific training configs.
 - `eval/`: runnable evaluation entry points.
 
 Run shell scripts from the repository root, or call them by path. They resolve
 the repository root automatically before launching framework code.
+
+For the supported end-to-end workflow, start with the repository [README](../README.md).

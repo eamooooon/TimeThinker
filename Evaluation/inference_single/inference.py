@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
+import sys
+from pathlib import Path
 import torch
 from transformers import AutoProcessor
 from vllm import LLM, SamplingParams
@@ -7,6 +9,12 @@ from qwen_vl_utils import process_vision_info
 
 # Import SAM2 visualization (used only for segmentation)
 from simple_sam2_vis import visualize_segmentation
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.prompting.timethinker import QUESTION_TEMPLATE, TYPE_TEMPLATE as QA_TYPE_TEMPLATE
 
 # vLLM multiprocessing mode
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -32,80 +40,35 @@ PROBLEM_TYPE = "segmentation_video"
 
 # ==========================================================
 
-QUESTION_TEMPLATE = (
-    "{Question}\n"
-    "Please answer this question based on the visual content."
-    "Provide your thinking process between the <think> and </think> tags, and then give your final answer between the <answer> and </answer> tags."
-    "At the end, you must output the final answer in the format:\n"
-    "<answer><your_answer_here></answer>\n"
-)
-
 TYPE_TEMPLATE = {
-    "multiple choice": (
-        "Please provide only the single option letter (e.g., A, B, C, D, etc.) "
-        "within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>A</answer>"
-    ),
-    "numerical": (
-        "Please provide only the numerical value within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>3.14</answer>"
-    ),
-    "OCR": (
-        "Please provide only the transcribed text within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>Hello World</answer>"
-    ),
-    "open-ended": (
-        "Please provide only your text answer within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>The capital of France is Paris.</answer>"
-    ),
-    "regression": (
-        "Please provide only the numerical value within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>42.7</answer>"
-    ),
-    "math": (
-        "Please provide only the final result (a number or LaTeX formula) within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>$$-\\dfrac{3}{2}$$</answer>"
-    ),
+    **QA_TYPE_TEMPLATE,
     "temporal grounding": (
-        "Please provide only the time span in seconds as JSON within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>{\"time\": [12.3, 25.7]}</answer>"
+        "Provide only the time span in seconds as JSON with key \"time\" inside <answer>.\n"
+        "The value of \"time\" must be a two-number list [start, end]."
     ),
     "spatial grounding": (
-        "Please provide only the bounding box as JSON with key 'boxes' within the <answer>...</answer> tags.\n"
-        "Example:\n<answer>{\"boxes\": [35, 227, 437, 932]}</answer>"
+        "Provide only one bounding box as JSON with key \"boxes\" inside <answer>.\n"
+        "The value of \"boxes\" must be a four-number list [x1, y1, x2, y2]."
     ),
     "spatial-temporal grounding": (
-        "Please provide only the time span in seconds and bounding boxes as JSON within the <answer>...</answer> tags.\n"
-        "You MUST output one bounding box for every integer second within the given time span (inclusive).\n"
-        "Example:\n"
-        "<answer>{\"time\": [8.125, 13.483], \"boxes\": {\"9\": [317, 422, 582, 997], "
-        "\"10\": [332, 175, 442, 369], \"11\": [340, 180, 450, 370]}}</answer>\n"
-        "Note: Each key in 'boxes' must be an integer second within the span, and its value must be a 4-number bounding box [x1, y1, x2, y2]."
+        "Provide the time span and bounding boxes as JSON inside <answer>.\n"
+        "Use a two-number \"time\" list and a \"boxes\" object. Each \"boxes\" key must be an integer second "
+        "within the span, and each value must be [x1, y1, x2, y2]."
     ),
     "tracking": (
-        "Please track the target object throughout the video and provide one bounding box per second, "
-        "ONLY up to 32 seconds, within the <answer>...</answer> tags.\n"
-        "Example:\n"
-        "<answer>{\"boxes\": {\"1\": [405, 230, 654, 463], \"2\": [435, 223, 678, 446], ..., "
-        "\"32\": [415, 203, 691, 487]}}</answer>\n"
-        "Note: Each key in 'boxes' must correspond to a second (1, 2, 3, ..., 32) and contain a 4-number bounding box [x1, y1, x2, y2]."
+        "Track the target object and provide one bounding box per second, up to 32 seconds, as JSON inside <answer>.\n"
+        "Use a \"boxes\" object whose keys are seconds and whose values are [x1, y1, x2, y2]."
     ),
     "segmentation_image": (
         "This task prepares inputs for image object segmentation with a specialized model (e.g., SAM2).\n"
-        "Please provide ONE bounding box, 3 positive points (clearly INSIDE the object), and 3 negative points "
-        "(clearly OUTSIDE the object) within the <answer>...</answer> tags.\n"
-        "Example:\n"
-        "<answer>{\"boxes\": [x1, y1, x2, y2], \"positive_points\": [[x,y],[x,y],[x,y]], "
-        "\"negative_points\": [[x,y],[x,y],[x,y]]}</answer>"
+        "Provide JSON inside <answer> with \"boxes\", \"positive_points\", and \"negative_points\".\n"
+        "Use one [x1, y1, x2, y2] box, three positive points inside the object, and three negative points outside it."
     ),
     "segmentation_video": (
         "This task prepares inputs for video object segmentation with a specialized model (e.g., SAM2).\n"
-        "Please select ONE representative time (in seconds), and provide ONE bounding box, "
-        "3 positive points (clearly INSIDE the object), and 3 negative points (clearly OUTSIDE the object) "
-        "within the <answer>...</answer> tags.\n"
-        "Example:\n"
-        "<answer>{\"time\": <time_in_seconds>, \"boxes\": [x1, y1, x2, y2], "
-        "\"positive_points\": [[x,y],[x,y],[x,y]], \"negative_points\": [[x,y],[x,y],[x,y]]}</answer>"
+        "Provide JSON inside <answer> with \"time\", \"boxes\", \"positive_points\", and \"negative_points\".\n"
+        "Use one representative time in seconds, one [x1, y1, x2, y2] box, three positive points inside the "
+        "object, and three negative points outside it."
     )
 }
 

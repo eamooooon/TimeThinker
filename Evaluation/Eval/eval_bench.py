@@ -9,10 +9,17 @@ import argparse
 import random
 import hashlib
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.prompting.timethinker import QUESTION_TEMPLATE, TYPE_TEMPLATE
 
 from tqdm import tqdm
 try:
@@ -92,50 +99,6 @@ DEFAULT_MAX_PIXELS_IMAGE = 1024 * 32 * 32
 FRAME_CACHE_VERSION = 1
 FRAME_CACHE_IMAGE_EXT = "jpg"
 FRAME_CACHE_JPEG_QUALITY = 95
-
-# =========================
-# PROMPT
-# =========================
-QUESTION_TEMPLATE = (
-    "{Question}\n"
-    "Please answer this question based on the visual content. "
-    "Provide your thinking process between the <think> and </think> tags, "
-    "and then give your final answer between the <answer> and </answer> tags. "
-    "At the end, you must output the final answer in the format:\n"
-    "<answer><your_answer_here></answer>\n"
-)
-
-TYPE_TEMPLATE = {
-    "multiple choice": (
-        "The final answer inside <answer> must be only one option letter from the given options.\n"
-        "Use <think> for reasoning, then put only the final option letter inside <answer>."
-    ),
-    "numerical": (
-        "The final answer inside <answer> must be only the numerical value.\n"
-        "Use <think> for reasoning, then put only the final numerical value inside <answer>."
-    ),
-    "OCR": (
-        "The final answer inside <answer> must be only the transcribed text.\n"
-        "Use <think> for reasoning, then put only the final transcribed text inside <answer>."
-    ),
-    "open-ended": (
-        "The final answer inside <answer> must be only your concise text answer.\n"
-        "Use <think> for reasoning, then put only the final concise text answer inside <answer>."
-    ),
-    "free-form": (
-        "The final answer inside <answer> must be only your concise text answer.\n"
-        "Use <think> for reasoning, then put only the final concise text answer inside <answer>."
-    ),
-    "regression": (
-        "The final answer inside <answer> must be only the numerical value.\n"
-        "Use <think> for reasoning, then put only the final numerical estimate inside <answer>."
-    ),
-    "math": (
-        "The final answer inside <answer> must be only the final result "
-        "(a number or LaTeX formula).\n"
-        "Use <think> for reasoning, then put only the final result inside <answer>."
-    )
-}
 
 # =========================
 # Utility functions (parsing and metrics)
