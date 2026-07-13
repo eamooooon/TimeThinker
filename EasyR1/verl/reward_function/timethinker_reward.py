@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 # Rewards for multimodal tasks with <think>...</think><answer>...</answer> outputs.
+import math
 import re
+import unicodedata
+from collections import Counter
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional
-import random
 
 import torch
 from rouge_score import rouge_scorer
@@ -36,6 +39,9 @@ ANSWER_CAPTURE_PATTERN = re.compile(
     r"<answer>\s*(.*?)\s*</answer>",
     re.DOTALL
 )
+
+ROUGE_SCORER = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=True)
+ROUGE_L_SCORER = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
 
 
 # -------------------------
@@ -78,9 +84,89 @@ def wer(reference: str, hypothesis: str) -> float:
 
 
 def compute_rouge_score(reference: str, hypothesis: str) -> float:
-    scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
-    scores = scorer.score(reference or "", hypothesis or "")
+    scores = ROUGE_SCORER.score(reference or "", hypothesis or "")
     return (scores['rouge1'].fmeasure + scores['rouge2'].fmeasure + scores['rougeL'].fmeasure) / 3.0
+
+
+def _normalize_text(text: str, *, compact: bool = False, casefold: bool = False) -> str:
+    """Apply conservative Unicode/whitespace normalization for text rewards."""
+    value = unicodedata.normalize("NFKC", text or "")
+    value = value.replace("\u200b", "").replace("\ufeff", "")
+    value = re.sub(r"\s+", " ", value).strip()
+    if compact:
+        value = re.sub(r"\s+", "", value)
+    if casefold:
+        value = value.casefold()
+    return value
+
+
+def _text_tokens(text: str) -> List[str]:
+    """Tokenize Latin text, LaTeX commands, numbers and CJK characters without extra models."""
+    normalized = _normalize_text(text, casefold=True)
+    return re.findall(
+        r"\\[A-Za-z]+|[A-Za-z0-9]+(?:[._/:-][A-Za-z0-9]+)*|[\u3400-\u9fff]|[^\s]",
+        normalized,
+    )
+
+
+def _token_f1(reference: str, hypothesis: str) -> float:
+    ref_tokens, hyp_tokens = _text_tokens(reference), _text_tokens(hypothesis)
+    if not ref_tokens or not hyp_tokens:
+        return float(ref_tokens == hyp_tokens)
+    overlap = sum((Counter(ref_tokens) & Counter(hyp_tokens)).values())
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(hyp_tokens)
+    recall = overlap / len(ref_tokens)
+    return 2.0 * precision * recall / (precision + recall)
+
+
+def _sequence_similarity(reference: str, hypothesis: str, *, compact: bool = False, casefold: bool = False) -> float:
+    ref = _normalize_text(reference, compact=compact, casefold=casefold)
+    hyp = _normalize_text(hypothesis, compact=compact, casefold=casefold)
+    if not ref or not hyp:
+        return float(ref == hyp)
+    # Disabling autojunk is more faithful for short OCR strings, but can be
+    # quadratic on long repetitive open-ended answers.
+    autojunk = max(len(ref), len(hyp)) >= 200
+    return SequenceMatcher(None, ref, hyp, autojunk=autojunk).ratio()
+
+
+def ocr_accuracy_v3(reference: str, hypothesis: str) -> float:
+    """Character-aware OCR score that also handles CJK and whitespace-heavy LaTeX."""
+    ref = _normalize_text(reference)
+    hyp = _normalize_text(hypothesis)
+    if ref == hyp:
+        return 1.0
+
+    spaced = _sequence_similarity(ref, hyp)
+    compact = _sequence_similarity(ref, hyp, compact=True)
+    case_insensitive = _sequence_similarity(ref, hyp, compact=True, casefold=True)
+    return max(0.0, min(1.0, 0.25 * spaced + 0.60 * compact + 0.15 * case_insensitive))
+
+
+def open_ended_accuracy_v3(reference: str, hypothesis: str) -> float:
+    """Hybrid lexical score with precision pressure to reduce reference-copy reward hacking.
+
+    This remains a deterministic single-reference proxy, not a semantic judge.  Token F1
+    penalizes unsupported verbosity, ROUGE-L rewards ordered content, and character
+    similarity keeps short/CJK answers useful.
+    """
+    ref = _normalize_text(reference)
+    hyp = _normalize_text(hypothesis)
+    if ref.casefold() == hyp.casefold():
+        return 1.0
+    rouge_l = ROUGE_L_SCORER.score(ref, hyp)["rougeL"].fmeasure
+    token_f1 = _token_f1(ref, hyp)
+    char_similarity = _sequence_similarity(ref, hyp, casefold=True)
+    return max(0.0, min(1.0, 0.50 * token_f1 + 0.35 * rouge_l + 0.15 * char_similarity))
+
+
+def regression_accuracy_v3(prediction: float, target: float) -> float:
+    """Smooth, bounded regression reward based on a stabilized symmetric relative error."""
+    scale = max((abs(prediction) + abs(target)) / 2.0, 1.0)
+    normalized_error = abs(prediction - target) / scale
+    return float(math.exp(-2.0 * normalized_error))
 
 
 # -------------------------
@@ -116,7 +202,8 @@ def _math_equivalent(gt: str, pred: str) -> bool:
 def accuracy_reward(response: str,
                     ground_truth: str,
                     data_type: str,
-                    problem_type: str) -> float:
+                    problem_type: str,
+                    formula_version: str = "legacy") -> float:
     """
     Normalized accuracy ∈ [0,1]. Strict format requirement: if the format is invalid, always return 0.
     Wrapped with try/except: any exception → 0.0.
@@ -138,12 +225,18 @@ def accuracy_reward(response: str,
             gt_num, pr_num = normalize_number(gt), normalize_number(ans)
             if gt_num is None or pr_num is None:
                 return 0.0
+            if formula_version == "v3":
+                return regression_accuracy_v3(pr_num, gt_num)
             return mean_relative_accuracy(pr_num, gt_num)
 
         if ptype == "ocr":
+            if formula_version == "v3":
+                return ocr_accuracy_v3(gt, ans)
             return max(0.0, min(1.0, 1.0 - wer(gt, ans)))
 
         if ptype == "open-ended":
+            if formula_version == "v3":
+                return open_ended_accuracy_v3(gt, ans)
             return max(0.0, min(1.0, compute_rouge_score(gt, ans)))
 
         if ptype == "math":
@@ -234,6 +327,7 @@ def evaluate_open_ended_with_rm(
 def compute_score(
     reward_inputs: List[Dict[str, Any]],
     format_weight: float = 0.2,
+    formula_version: str = "legacy",
     # ===== Still kept as configurable parameters =====
     rm_server_type: str = "vllm",
     rm_batch_size: int = 64,
@@ -258,6 +352,8 @@ def compute_score(
     """
     if not isinstance(reward_inputs, list):
         raise ValueError("Please use `reward_type=batch` for this reward function.")
+    if formula_version not in {"legacy", "v3"}:
+        raise ValueError(f"Unsupported formula_version: {formula_version!r}")
 
     results: List[Dict[str, float]] = []
     # ===================== Collect open-ended samples to be evaluated =====================
@@ -296,7 +392,9 @@ def compute_score(
                     "problem_id": item.get("problem_id", None),
                 })
             else:
-                a_score = accuracy_reward(response, gt_extracted, data_type, problem_type)
+                a_score = accuracy_reward(
+                    response, gt_extracted, data_type, problem_type, formula_version=formula_version
+                )
 
             overall = (1.0 - format_weight) * a_score + format_weight * f_score
 
@@ -325,18 +423,5 @@ def compute_score(
         normalize_model_reward_by_problem_id=normalize_model_reward_by_problem_id
     )
     # ======================================================================
-
-    if random.random() < 0.01:
-
-        for idx, item in enumerate(reward_inputs):
-
-            print('type', item.get("problem_type", ""))
-            print('gt', extract_answer(item.get("ground_truth", "")))
-            print('ans', extract_answer(item.get("response", "")))
-            print({
-                "overall": results[idx]["overall"],
-                "format": results[idx]["format"],
-                "accuracy": results[idx]["accuracy"],
-            })
 
     return results

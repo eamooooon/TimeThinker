@@ -54,11 +54,16 @@ from .core_algos import (
     get_kl_controller,
 )
 from .metrics import (
+    compute_group_score_stats,
     compute_data_metrics,
     compute_length_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
+    estimate_adaptive_refill_size,
+    normalize_problem_type,
     reduce_metrics,
+    summarize_group_score_stats,
+    summarize_reward_metrics_by_problem_type,
 )
 
 
@@ -190,6 +195,11 @@ class RayPPOTrainer:
         self.val_reward_score = 0.0
         self.best_val_reward_score = -1.0
         self.best_global_step = None
+        self._pending_prompt_batch = None
+        self.filter_keep_rate_ema = {
+            normalize_problem_type(problem_type): float(keep_rate)
+            for problem_type, keep_rate in config.algorithm.filter_type_initial_keep_rate.items()
+        }
 
         self.hybrid_engine = config.worker.hybrid_engine
         self.role_worker_mapping = role_worker_mapping
@@ -400,6 +410,7 @@ class RayPPOTrainer:
         # Lists to collect samples for the table
         sample_inputs, sample_outputs, sample_labels, sample_scores = [], [], [], []
         reward_metrics_lst = defaultdict(list)
+        val_problem_types = []
         length_metrics_lst = defaultdict(list)
         print("Start validation...")
         self.actor_rollout_ref_wg.prepare_rollout_engine()
@@ -440,6 +451,7 @@ class RayPPOTrainer:
             reward_tensor_lst.append(reward_tensor)
             for key, value in reward_metrics.items():
                 reward_metrics_lst[key].extend(value)
+            val_problem_types.extend(test_batch.non_tensor_batch["problem_type"].tolist())
 
             for key, value in compute_length_metrics(test_batch).items():
                 length_metrics_lst[key].append(value)
@@ -448,9 +460,29 @@ class RayPPOTrainer:
         self._maybe_log_val_generations(sample_inputs, sample_outputs, sample_labels, sample_scores)
         self.val_reward_score = torch.cat(reward_tensor_lst, dim=0).sum(-1).mean().item()
         val_reward_metrics = {f"val/{key}_reward": value for key, value in reduce_metrics(reward_metrics_lst).items()}
+        val_type_metrics = summarize_reward_metrics_by_problem_type(
+            val_problem_types,
+            reward_metrics_lst,
+            prefix="val/by_problem_type",
+            mean_suffix=False,
+        )
+        val_macro_metrics = {}
+        for metric_name in ("accuracy", "overall", "format"):
+            typed_values = [
+                value for key, value in val_type_metrics.items() if key.endswith(f"/{metric_name}")
+            ]
+            if typed_values:
+                val_macro_metrics[f"val/macro/{metric_name}"] = float(np.mean(typed_values))
+
         val_length_metrics = {f"val_{key}": value for key, value in reduce_metrics(length_metrics_lst).items()}
         print("Finish validation.")
-        return {"val/reward_score": self.val_reward_score, **val_reward_metrics, **val_length_metrics}
+        return {
+            "val/reward_score": self.val_reward_score,
+            **val_reward_metrics,
+            **val_type_metrics,
+            **val_macro_metrics,
+            **val_length_metrics,
+        }
 
     def _balance_batch(self, batch: DataProto, metrics: dict[str, Any], logging_prefix: str = "global_seqlen") -> None:
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
@@ -663,23 +695,59 @@ class RayPPOTrainer:
     def _make_batch_data(self, metrics: dict[str, Any]) -> DataProto:
         batch = None
         all_metrics = defaultdict(list)
+        pre_filter_problem_types = []
+        pre_filter_reward_metrics = defaultdict(list)
+        accepted_problem_types = []
+        accepted_reward_metrics = defaultdict(list)
+        filter_group_stats = {}
+        outcome_group_stats = {}
+        accepted_group_counts = defaultdict(int)
         has_reward_metrics = False
         num_try_make_batch = 0
+        generated_group_count = 0
         print("Start generating batch...")
         while True:
             num_try_make_batch += 1
-            try:
-                batch_dict = next(self.data_iterator)
-            except StopIteration:
-                self.data_iterator = iter(self.train_dataloader)
-                batch_dict = next(self.data_iterator)
-
             meta_info = {
                 "min_pixels": self.config.data.min_pixels,
                 "max_pixels": self.config.data.max_pixels,
                 "video_fps": self.config.data.video_fps,
             }
-            new_batch: DataProto = DataProto.from_single_dict(batch_dict, meta_info=meta_info)
+
+            prompt_pool = self._pending_prompt_batch
+            target_pool_size = self.config.data.rollout_batch_size
+            while prompt_pool is None or len(prompt_pool) < target_pool_size:
+                try:
+                    batch_dict = next(self.data_iterator)
+                except StopIteration:
+                    self.data_iterator = iter(self.train_dataloader)
+                    batch_dict = next(self.data_iterator)
+                fetched_batch = DataProto.from_single_dict(batch_dict, meta_info=meta_info)
+                prompt_pool = (
+                    DataProto.concat([prompt_pool, fetched_batch]) if prompt_pool is not None else fetched_batch
+                )
+
+            current_batch_size = 0 if batch is None else len(batch) // self.config.worker.rollout.n
+            remaining_groups = self.config.data.rollout_batch_size - current_batch_size
+            if self.config.algorithm.filter_adaptive_refill and batch is not None:
+                requested_group_count = estimate_adaptive_refill_size(
+                    prompt_pool.non_tensor_batch["problem_type"].tolist(),
+                    remaining_groups=remaining_groups,
+                    keep_rate_ema=self.filter_keep_rate_ema,
+                    default_keep_rate=self.config.algorithm.filter_keep_rate_default,
+                    oversample=self.config.algorithm.filter_refill_oversample,
+                    min_batch_size=self.config.algorithm.filter_refill_min_batch_size,
+                    batch_size_multiple=self.actor_rollout_ref_wg.world_size,
+                    max_batch_size=target_pool_size,
+                )
+            else:
+                requested_group_count = min(self.config.data.rollout_batch_size, len(prompt_pool))
+
+            new_batch = prompt_pool[:requested_group_count]
+            self._pending_prompt_batch = (
+                prompt_pool[requested_group_count:] if requested_group_count < len(prompt_pool) else None
+            )
+            generated_group_count += requested_group_count
             new_batch.non_tensor_batch["uid"] = np.array(
                 [str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object
             )
@@ -728,6 +796,7 @@ class RayPPOTrainer:
             new_batch = new_batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
             new_batch = new_batch.union(gen_batch_output)
 
+            reward_metrics = None
             if self.config.algorithm.temporal or self.config.algorithm.len_control:
                 reward_tensor, reward_metrics = ray.get(self.reward_fn.compute_reward.remote(new_batch))
                 if shuffled_gen_batch_output is not None:
@@ -753,26 +822,104 @@ class RayPPOTrainer:
                         all_metrics[k].extend(v)
                     has_reward_metrics = True
 
-                filter_scores = reward_metrics[self.config.algorithm.filter_key]
-                uids = new_batch.non_tensor_batch["uid"]
-                uid2scores = defaultdict(list)
-                for uid, score in zip(uids, filter_scores):
-                    uid2scores[uid].append(score)
+            selected_sample_idxs = list(range(len(new_batch)))
+            if reward_metrics is not None:
+                problem_types = new_batch.non_tensor_batch["problem_type"].tolist()
+                tracked_reward_metrics = {
+                    key: value
+                    for key, value in reward_metrics.items()
+                    if key in {"accuracy", "overall", "format", "final_overall", "length_bonus"}
+                    and len(value) == len(new_batch)
+                }
+                pre_filter_problem_types.extend(problem_types)
+                for key, value in tracked_reward_metrics.items():
+                    pre_filter_reward_metrics[key].extend(value)
 
-                uid2mean = {uid: np.mean(scores) for uid, scores in uid2scores.items()}
-                kept_uids = [
-                    uid
-                    for uid, avg_score in uid2mean.items()
-                    if avg_score > self.config.algorithm.filter_low and avg_score < self.config.algorithm.filter_high
-                ]
-                kept_sample_idxs = [idx for idx, uid in enumerate(uids) if uid in kept_uids]
-                if len(kept_sample_idxs) == 0:
-                    raise RuntimeError("No sample is kept after filtering. Please check your data.")
+                if self.config.algorithm.online_filtering:
+                    filter_scores = reward_metrics[self.config.algorithm.filter_key]
+                    outcome_scores = new_batch.batch["token_level_scores"].sum(dim=-1).detach().cpu().tolist()
+                    uids = new_batch.non_tensor_batch["uid"].tolist()
+                    current_filter_stats = compute_group_score_stats(uids, problem_types, filter_scores)
+                    current_outcome_stats = compute_group_score_stats(uids, problem_types, outcome_scores)
+                    kept_uids = set()
+                    for uid, group_stats in current_filter_stats.items():
+                        problem_type = normalize_problem_type(group_stats["problem_type"])
+                        type_min_std = self.config.algorithm.filter_type_min_std.get(
+                            problem_type, self.config.algorithm.filter_key_min_std
+                        )
+                        type_min_range = self.config.algorithm.filter_type_min_range.get(problem_type, 0.0)
+                        mean_pass = (
+                            group_stats["mean"] > self.config.algorithm.filter_low
+                            and group_stats["mean"] < self.config.algorithm.filter_high
+                        )
+                        filter_variance_pass = (
+                            group_stats["std"] >= type_min_std
+                            and group_stats["range"] >= type_min_range
+                        )
+                        outcome_variance_pass = (
+                            current_outcome_stats[uid]["std"] >= self.config.algorithm.filter_min_std
+                        )
+                        variance_pass = filter_variance_pass and outcome_variance_pass
+                        signal_pass = mean_pass and variance_pass
+                        max_ratio = self.config.algorithm.filter_type_max_ratio.get(problem_type)
+                        max_groups = (
+                            max(1, int(self.config.data.rollout_batch_size * max_ratio))
+                            if max_ratio is not None
+                            else None
+                        )
+                        quota_pass = max_groups is None or accepted_group_counts[problem_type] < max_groups
+                        kept = signal_pass and quota_pass
+                        group_stats.update(
+                            mean_pass=mean_pass,
+                            filter_variance_pass=filter_variance_pass,
+                            outcome_variance_pass=outcome_variance_pass,
+                            variance_pass=variance_pass,
+                            signal_pass=signal_pass,
+                            quota_pass=quota_pass,
+                            kept=kept,
+                        )
+                        current_outcome_stats[uid].update(
+                            mean_pass=mean_pass,
+                            filter_variance_pass=filter_variance_pass,
+                            outcome_variance_pass=outcome_variance_pass,
+                            variance_pass=variance_pass,
+                            signal_pass=signal_pass,
+                            quota_pass=quota_pass,
+                            kept=kept,
+                        )
+                        if kept:
+                            kept_uids.add(uid)
+                            accepted_group_counts[problem_type] += 1
 
-                new_batch = new_batch[kept_sample_idxs]
+                    filter_group_stats.update(current_filter_stats)
+                    outcome_group_stats.update(current_outcome_stats)
+                    selected_sample_idxs = [idx for idx, uid in enumerate(uids) if uid in kept_uids]
 
-            batch = DataProto.concat([batch, new_batch]) if batch is not None else new_batch
-            current_batch_size = len(batch) // self.config.worker.rollout.n
+                    type_signal_counts = defaultdict(lambda: [0, 0])
+                    for group_stats in current_filter_stats.values():
+                        problem_type = normalize_problem_type(group_stats["problem_type"])
+                        type_signal_counts[problem_type][1] += 1
+                        type_signal_counts[problem_type][0] += int(group_stats["signal_pass"])
+                    alpha = self.config.algorithm.filter_keep_rate_ema_alpha
+                    for problem_type, (passed, total) in type_signal_counts.items():
+                        observed_rate = passed / total
+                        old_rate = self.filter_keep_rate_ema.get(
+                            problem_type, self.config.algorithm.filter_keep_rate_default
+                        )
+                        self.filter_keep_rate_ema[problem_type] = (
+                            (1.0 - alpha) * old_rate + alpha * observed_rate
+                        )
+
+                if selected_sample_idxs:
+                    accepted_problem_types.extend([problem_types[idx] for idx in selected_sample_idxs])
+                    for key, value in tracked_reward_metrics.items():
+                        accepted_reward_metrics[key].extend([value[idx] for idx in selected_sample_idxs])
+
+            if selected_sample_idxs:
+                new_batch = new_batch[selected_sample_idxs]
+                batch = DataProto.concat([batch, new_batch]) if batch is not None else new_batch
+
+            current_batch_size = 0 if batch is None else len(batch) // self.config.worker.rollout.n
             rollout_batch_size = self.config.data.rollout_batch_size
             if current_batch_size < rollout_batch_size:
                 print(f"{current_batch_size=} < {rollout_batch_size=}")
@@ -787,8 +934,56 @@ class RayPPOTrainer:
                 print(f"{current_batch_size=} >= {rollout_batch_size=}. Finish generating.")
                 if has_reward_metrics:
                     metrics.update({f"reward/{k}": v for k, v in reduce_metrics(all_metrics).items()})
+                target_sample_count = self.config.data.rollout_batch_size * self.config.worker.rollout.n
+                final_batch = batch[:target_sample_count]
+                metrics["train/filter/attempt_count"] = num_try_make_batch
+                metrics["train/filter/generated_group_count"] = generated_group_count
+                metrics["train/filter/generated_response_count"] = (
+                    generated_group_count * self.config.worker.rollout.n
+                )
+                for problem_type, keep_rate in sorted(self.filter_keep_rate_ema.items()):
+                    metrics[f"train/filter/{problem_type}/keep_rate_ema"] = keep_rate
+                if pre_filter_problem_types:
+                    metrics.update(
+                        summarize_reward_metrics_by_problem_type(
+                            pre_filter_problem_types,
+                            pre_filter_reward_metrics,
+                            prefix="train/reward/pre_filter",
+                            metric_names=tuple(pre_filter_reward_metrics.keys()),
+                        )
+                    )
 
-                return batch[: self.config.data.rollout_batch_size * self.config.worker.rollout.n]
+                if accepted_problem_types:
+                    final_problem_types = accepted_problem_types[:target_sample_count]
+                    final_reward_metrics = {
+                        key: value[:target_sample_count] for key, value in accepted_reward_metrics.items()
+                    }
+                    metrics.update(
+                        summarize_reward_metrics_by_problem_type(
+                            final_problem_types,
+                            final_reward_metrics,
+                            prefix="train/reward/post_filter",
+                            metric_names=tuple(final_reward_metrics.keys()),
+                        )
+                    )
+
+                if filter_group_stats:
+                    metrics.update(
+                        summarize_group_score_stats(
+                            filter_group_stats,
+                            prefix="train/filter",
+                            score_name="filter_score",
+                        )
+                    )
+                    metrics.update(
+                        summarize_group_score_stats(
+                            outcome_group_stats,
+                            prefix="train/filter",
+                            score_name="outcome_reward",
+                        )
+                    )
+
+                return final_batch
 
     def fit(self):
         """
@@ -870,6 +1065,19 @@ class RayPPOTrainer:
                         metrics.update(kl_metrics)
                     else:
                         batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+
+                    update_group_stats = compute_group_score_stats(
+                        batch.non_tensor_batch["uid"].tolist(),
+                        batch.non_tensor_batch["problem_type"].tolist(),
+                        batch.batch["token_level_rewards"].sum(dim=-1).detach().cpu().tolist(),
+                    )
+                    metrics.update(
+                        summarize_group_score_stats(
+                            update_group_stats,
+                            prefix="train/update",
+                            score_name="outcome_reward",
+                        )
+                    )
 
                     # compute advantages, executed on the driver process
                     batch = compute_advantage(

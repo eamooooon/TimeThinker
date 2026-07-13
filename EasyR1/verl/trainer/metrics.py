@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -22,6 +25,178 @@ from ..protocol import DataProto
 
 def reduce_metrics(metrics: dict[str, list[Any]]) -> dict[str, Any]:
     return {key: np.mean(value) for key, value in metrics.items()}
+
+
+def normalize_problem_type(problem_type: Any) -> str:
+    """Normalize problem types for stable metric keys."""
+    normalized = str(problem_type or "unknown").strip().lower().replace("-", "_").replace(" ", "_")
+    normalized = re.sub(r"[^a-z0-9_]+", "_", normalized).strip("_")
+    if normalized == "free_form":
+        return "open_ended"
+
+    return normalized or "unknown"
+
+
+def estimate_adaptive_refill_size(
+    candidate_problem_types: Sequence[Any],
+    remaining_groups: int,
+    keep_rate_ema: Mapping[str, float],
+    default_keep_rate: float,
+    oversample: float = 1.2,
+    min_batch_size: int = 2,
+    batch_size_multiple: int = 1,
+    max_batch_size: int | None = None,
+) -> int:
+    """Size a refill so its expected accepted groups cover the remaining target.
+
+    Candidates stay in their dataloader order. Their type-specific EMA probabilities
+    are accumulated until the expected yield reaches ``remaining * oversample``.
+    """
+    candidates = list(candidate_problem_types)
+    if max_batch_size is not None:
+        if max_batch_size < 1:
+            raise ValueError("max_batch_size must be at least 1")
+        candidates = candidates[:max_batch_size]
+
+    if remaining_groups <= 0 or not candidates:
+        return 0
+
+    if batch_size_multiple < 1:
+        raise ValueError("batch_size_multiple must be at least 1")
+
+    def align_size(size: int) -> int:
+        max_aligned_size = (len(candidates) // batch_size_multiple) * batch_size_multiple
+        if max_aligned_size == 0:
+            raise ValueError(
+                f"Need at least {batch_size_multiple} candidates for an aligned refill, "
+                f"got {len(candidates)}"
+            )
+        aligned = ((size + batch_size_multiple - 1) // batch_size_multiple) * batch_size_multiple
+        return min(aligned, max_aligned_size)
+
+    min_batch_size = min(max(1, min_batch_size), len(candidates))
+    expected_kept = 0.0
+    target_expected_kept = remaining_groups * oversample
+    for index, raw_problem_type in enumerate(candidates, start=1):
+        problem_type = normalize_problem_type(raw_problem_type)
+        keep_rate = float(keep_rate_ema.get(problem_type, default_keep_rate))
+        expected_kept += min(1.0, max(1e-6, keep_rate))
+        if index >= min_batch_size and expected_kept >= target_expected_kept:
+            return align_size(index)
+
+    return align_size(len(candidates))
+
+
+def summarize_reward_metrics_by_problem_type(
+    problem_types: Sequence[Any],
+    reward_metrics: Mapping[str, Sequence[Any]],
+    prefix: str,
+    metric_names: Sequence[str] = ("accuracy", "overall", "format"),
+    mean_suffix: bool = True,
+) -> dict[str, Any]:
+    """Compute per-problem-type sample means and counts from aligned reward arrays."""
+    normalized_types = [normalize_problem_type(problem_type) for problem_type in problem_types]
+    grouped_indices: dict[str, list[int]] = defaultdict(list)
+    for idx, problem_type in enumerate(normalized_types):
+        grouped_indices[problem_type].append(idx)
+
+    result: dict[str, Any] = {}
+    for problem_type, indices in sorted(grouped_indices.items()):
+        result[f"{prefix}/{problem_type}/sample_count"] = len(indices)
+        for metric_name in metric_names:
+            if metric_name not in reward_metrics:
+                continue
+
+            values = reward_metrics[metric_name]
+            if len(values) != len(normalized_types):
+                raise ValueError(
+                    f"Reward metric {metric_name!r} has {len(values)} values, "
+                    f"but there are {len(normalized_types)} problem types."
+                )
+
+            metric_key = f"{metric_name}_mean" if mean_suffix else metric_name
+            result[f"{prefix}/{problem_type}/{metric_key}"] = float(
+                np.mean([float(values[idx]) for idx in indices])
+            )
+
+    return result
+
+
+def compute_group_score_stats(
+    uids: Sequence[Any], problem_types: Sequence[Any], scores: Sequence[Any]
+) -> dict[Any, dict[str, Any]]:
+    """Group aligned scalar scores by prompt UID and compute outcome statistics."""
+    if not (len(uids) == len(problem_types) == len(scores)):
+        raise ValueError(
+            "uids, problem_types, and scores must have the same length: "
+            f"{len(uids)}, {len(problem_types)}, {len(scores)}"
+        )
+
+    grouped_scores: dict[Any, list[float]] = defaultdict(list)
+    grouped_types: dict[Any, str] = {}
+    for uid, raw_problem_type, score in zip(uids, problem_types, scores):
+        problem_type = normalize_problem_type(raw_problem_type)
+        previous_type = grouped_types.setdefault(uid, problem_type)
+        if previous_type != problem_type:
+            raise ValueError(f"UID {uid!r} contains multiple problem types: {previous_type!r}, {problem_type!r}")
+
+        grouped_scores[uid].append(float(score))
+
+    result: dict[Any, dict[str, Any]] = {}
+    for uid, values in grouped_scores.items():
+        score_array = np.asarray(values, dtype=np.float64)
+        result[uid] = {
+            "problem_type": grouped_types[uid],
+            "sample_count": len(values),
+            "mean": float(np.mean(score_array)),
+            "std": float(np.std(score_array)),
+            "range": float(np.max(score_array) - np.min(score_array)),
+        }
+
+    return result
+
+
+def summarize_group_score_stats(
+    group_stats: Mapping[Any, Mapping[str, Any]],
+    prefix: str,
+    score_name: str,
+    zero_std_threshold: float = 1e-6,
+) -> dict[str, Any]:
+    """Reduce precomputed group statistics by problem type for experiment logging."""
+    stats_by_type: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for stats in group_stats.values():
+        stats_by_type[str(stats["problem_type"])].append(stats)
+
+    result: dict[str, Any] = {}
+    for problem_type, typed_stats in sorted(stats_by_type.items()):
+        means = [float(stats["mean"]) for stats in typed_stats]
+        stds = [float(stats["std"]) for stats in typed_stats]
+        ranges = [float(stats["range"]) for stats in typed_stats]
+        base_key = f"{prefix}/{problem_type}"
+        result[f"{base_key}/group_count"] = len(typed_stats)
+        result[f"{base_key}/{score_name}_mean"] = float(np.mean(means))
+        result[f"{base_key}/{score_name}_group_std_mean"] = float(np.mean(stds))
+        result[f"{base_key}/{score_name}_group_std_min"] = float(np.min(stds))
+        result[f"{base_key}/{score_name}_group_range_mean"] = float(np.mean(ranges))
+        result[f"{base_key}/{score_name}_zero_std_ratio"] = float(
+            np.mean([std <= zero_std_threshold for std in stds])
+        )
+
+        for flag_name in (
+            "mean_pass",
+            "filter_variance_pass",
+            "outcome_variance_pass",
+            "variance_pass",
+            "signal_pass",
+            "quota_pass",
+            "kept",
+        ):
+            if all(flag_name in stats for stats in typed_stats):
+                flag_values = [bool(stats[flag_name]) for stats in typed_stats]
+                result[f"{base_key}/{flag_name}_group_count"] = int(sum(flag_values))
+                result[f"{base_key}/{flag_name}_ratio"] = float(np.mean(flag_values))
+
+    return result
 
 
 def compute_length_metrics(batch: DataProto) -> dict[str, Any]:

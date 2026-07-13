@@ -40,7 +40,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.prompting.timethinker import QUESTION_TEMPLATE, TYPE_TEMPLATE
+from scripts.prompting.timethinker import build_prompt
 
 from . import torch_functional as VF
 
@@ -540,15 +540,14 @@ class RLHFDataset(Dataset):
             format_prompt = Template(self.format_prompt.strip())
             prompt_str = format_prompt.render(content=prompt_str)
 
-        pt = example.get("problem_type") or ""
-        question = prompt_str  
+        pt = (example.get("problem_type") or "").strip().lower()
+        question = prompt_str
 
         if (pt == "multiple choice") and isinstance(example.get("options"), list) and example["options"]:
             opts = "\n".join(example["options"])
             question = f"{question}\nOptions:\n{opts}"
 
-        tail = TYPE_TEMPLATE.get(pt, "")
-        prompt_str = QUESTION_TEMPLATE.format(Question=question) + tail
+        prompt_str = build_prompt(question, pt)
 
         if self.image_key in example and isinstance(example.get(self.image_key), list) and len(example.get(self.image_key)) > 0:
             # https://huggingface.co/docs/transformers/en/tasks/image_text_to_text

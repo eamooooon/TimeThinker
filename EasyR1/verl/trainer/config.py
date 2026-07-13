@@ -17,7 +17,7 @@ PPO config
 
 import os
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from ..workers.config import WorkerConfig
 
@@ -101,6 +101,28 @@ class AlgorithmConfig:
     """filter out low reward samples if online filtering"""
     filter_high: float = 0.99
     """filter out high reward samples if online filtering"""
+    filter_key_min_std: float = 0.0
+    """minimum group std of filter_key; rejects groups with no answer-quality ranking signal"""
+    filter_min_std: float = 0.0
+    """minimum group std of the final outcome reward; 0 keeps backward-compatible filtering"""
+    filter_type_min_std: Dict[str, float] = field(default_factory=dict)
+    """optional problem-type overrides for minimum filter-key std"""
+    filter_type_min_range: Dict[str, float] = field(default_factory=dict)
+    """optional minimum filter-key range by problem type"""
+    filter_type_max_ratio: Dict[str, float] = field(default_factory=dict)
+    """optional caps on each problem type's share of accepted prompt groups"""
+    filter_adaptive_refill: bool = False
+    """adapt refill generation size to the remaining groups and per-type keep-rate EMA"""
+    filter_keep_rate_ema_alpha: float = 0.1
+    """EMA update weight assigned to the latest per-type keep rate"""
+    filter_keep_rate_default: float = 0.3
+    """initial keep-rate estimate for problem types without an explicit value"""
+    filter_type_initial_keep_rate: Dict[str, float] = field(default_factory=dict)
+    """optional initial filtering keep-rate estimate by normalized problem type"""
+    filter_refill_oversample: float = 1.2
+    """expected accepted-group safety factor when sizing a refill rollout"""
+    filter_refill_min_batch_size: int = 2
+    """minimum number of prompt groups in an adaptive refill rollout"""
     temporal: bool = False
     """enable Video-R1 style T-GRPO temporal reward shaping"""
     shuffled_rollout_ratio: float = 0.5
@@ -119,6 +141,46 @@ class AlgorithmConfig:
     """minimum response length for length-control reward"""
     len_max: int = 512
     """maximum response length for length-control reward"""
+
+    def post_init(self):
+        if self.filter_key_min_std < 0 or self.filter_min_std < 0:
+            raise ValueError(
+                "filter_key_min_std and filter_min_std must be non-negative, got "
+                f"{self.filter_key_min_std} and {self.filter_min_std}."
+            )
+
+        for name, values in (
+            ("filter_type_min_std", self.filter_type_min_std),
+            ("filter_type_min_range", self.filter_type_min_range),
+        ):
+            invalid = {key: value for key, value in values.items() if value < 0}
+            if invalid:
+                raise ValueError(f"{name} values must be non-negative, got {invalid}.")
+
+        invalid_ratios = {
+            key: value for key, value in self.filter_type_max_ratio.items() if not 0 < value <= 1
+        }
+        if invalid_ratios:
+            raise ValueError(f"filter_type_max_ratio values must be in (0, 1], got {invalid_ratios}.")
+
+        if not 0 < self.filter_keep_rate_ema_alpha <= 1:
+            raise ValueError("filter_keep_rate_ema_alpha must be in (0, 1].")
+        if not 0 < self.filter_keep_rate_default <= 1:
+            raise ValueError("filter_keep_rate_default must be in (0, 1].")
+        invalid_keep_rates = {
+            key: value for key, value in self.filter_type_initial_keep_rate.items() if not 0 < value <= 1
+        }
+        if invalid_keep_rates:
+            raise ValueError(f"filter_type_initial_keep_rate values must be in (0, 1], got {invalid_keep_rates}.")
+        if self.filter_refill_oversample < 1:
+            raise ValueError("filter_refill_oversample must be at least 1.")
+        if self.filter_refill_min_batch_size < 1:
+            raise ValueError("filter_refill_min_batch_size must be at least 1.")
+
+        if self.online_filtering and self.filter_low >= self.filter_high:
+            raise ValueError(
+                f"filter_low must be smaller than filter_high, got {self.filter_low} >= {self.filter_high}."
+            )
 
 
 @dataclass

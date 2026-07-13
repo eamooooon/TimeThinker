@@ -59,4 +59,5 @@ bash scripts/eval/run_bench.sh
 | [docs/eval.md](docs/eval.md) | Current canonical leaderboard, evaluator/prompt history, and comparability rules |
 | [docs/PROJECT.md](docs/PROJECT.md) | Scope and current Video-R1-based project positioning |
 | [docs/data.md](docs/data.md) | Data mixture and capability analysis |
-| [docs/archive/README.md](docs/archive/README.md) | Historical ablations, daily logs, legacy evaluation reports, and case notes |
+| [docs/daily.md](docs/daily.md) | Current chronological record of training, evaluation, storage, and engineering work |
+| [docs/archive/README.md](docs/archive/README.md) | Historical ablations, legacy evaluation reports, and case notes |

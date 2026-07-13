@@ -2,6 +2,78 @@
 
 记录训练、评测、数据和工程优化的日常推进。日期按 UTC 工作区时间记录。
 
+## 2026-07-12
+
+### 仓库、文档与磁盘整理
+
+- 将 Quick Start、环境安装、数据下载、SFT/RL 训练和评测入口集中到根目录 `README.md`，减少首次使用时在多份文档之间跳转。
+- 将运行维护说明整理为中文 `docs/OPERATIONS.md`，覆盖磁盘排查、checkpoint 清理、模型合并、日志定位和常见恢复操作。
+- 精简 `docs/` 主目录，将历史消融、旧评测口径和阶段性问题记录移动到 `docs/archive/`；主目录只保留当前仍需维护的项目、数据、评测和运维文档。
+- 评测入口收敛到 `Evaluation/Eval/eval_bench.py`，旧 v1/v2/v3 实现不再作为活跃入口；历史差异和结果保留在 archive 文档中。
+- 清理训练输出中的过期 optimizer、extra-state 和重复 checkpoint，并将需要长期保留的 FSDP 模型分片合并为 Hugging Face `safetensors`，避免一个实验同时保留多份 40+ GiB 的可续训状态。
+- 对 `/tianyuesong` 可见目录、隐藏目录、`.git`、`.ipynb_checkpoints`、deleted-open 文件和常见临时/回收站位置做过排查；容器内 `du` 与平台 GPFS 配额口径并不等价，服务端 fileset quota、快照和其他节点打开文件仍需管理员侧命令才能彻底闭环。
+
+### SFT-v9 起点的 200-step RL 验证
+
+- 新增并运行 `config/rl/qwen3_rl_sftv9_kl200.yaml`：
+  - 从 `models/TimeThinker-4B-SFT-v9-10k-canonical` 初始化。
+  - `max_steps=200`、`rollout_batch_size=16`、`rollout.n=8`。
+  - 正确启用 reference policy 和 loss-level KL：`disable_kl=false`、`use_kl_loss=true`、`kl_coef=0.01`。
+  - 将 format reward 降为 `0.05`、length reward 降为 `0.02`，固定验证每 25 step 执行一次。
+- 训练正常完成 `200/200`，耗时约 `4h56m`；无 OOM、NaN、worker death 或持续梯度/entropy/长度异常。
+- 固定 512 条验证集结果：
+
+| Step | Accuracy | Overall |
+|---:|---:|---:|
+| 0 | 0.672995 | 0.688368 |
+| 25 | 0.642536 | 0.659238 |
+| 50 | 0.659791 | 0.675923 |
+| 75 | 0.667859 | 0.683196 |
+| 100 | 0.665694 | 0.681433 |
+| 125 | 0.670031 | 0.685845 |
+| 150 | 0.671597 | 0.687236 |
+| 175 | **0.673945** | **0.689565** |
+| 200 | 0.667156 | 0.683017 |
+
+- 最佳观测点 step 175 仅比 SFT 基线高 `0.095 pp`，最终 step 200 低 `0.584 pp`；当前 reward 没有带来显著、稳定的泛化提升。
+- `val_freq=25` 与 `save_freq=50` 不一致导致 step 175 没有 checkpoint；后续应对齐验证和保存频率，并按固定验证指标保存 best。
+- 全程监控、异常阈值、checkpoint 选择与最终审计记录在 `docs/archive/rl_kl200_monitor.md`。
+- 修复 `EasyR1/verl/workers/actor/dp_actor.py` 的 KL 指标聚合：此前每卡只保留最后一个 microbatch，现在会聚合所有 microbatch；该缺陷只影响日志精度，不影响已经执行的 KL 反向传播。
+
+### Reward 与 online filtering 审计
+
+- 当前训练日志的 `reward/*` 是所有生成重试的过滤前候选全局均值，不应被当作单调学习曲线；固定验证才是可比较口径。
+- 训练集与 val-512 的题型比例基本一致：multiple choice `64.2%`、open-ended `14.7%`、numerical `13.1%`、OCR `6.0%`、regression `2.0%`。
+- 现有日志没有按 `problem_type` 保存 reward 趋势，也没有区分过滤前、过滤后和最终 update batch；选择题占 64%，全局均值可能掩盖小题型变化。
+- online filtering 当前按组平均 accuracy 过滤；这对二值 reward 可排除全对/全错组，但不能保证连续/多档 reward 的组内有效方差，也没有直接检查 GRPO 实际使用的 `overall + length bonus`。
+- 题型 reward 的主要问题：
+  - open-ended 使用单参考 ROUGE，语义等价答案可能被误罚。
+  - OCR 使用空格级 WER，不适合无空格文本和公式等价表达。
+  - regression 只有有限档位，同档回答缺少排序信号。
+  - numerical 固定按两位小数完全相等，缺少合理的绝对/相对容差。
+- 已完成第一轮 P0 修复：
+  - validation 新增每个 `problem_type` 的 accuracy/overall/format/count 及 macro 指标。
+  - train 新增逐题型 pre-filter、post-filter、实际 update reward，以及 filter-key/final-outcome 两套 group std、range、零方差率和保留率。
+  - online filtering 新增 `filter_key_min_std` 与 `filter_min_std`；活跃 GRPO 配置均设为 `1e-3`，同时排除答案分数无差异和最终 outcome 无差异的组。
+  - 某次生成没有留下任何组时不再立即报错，而是继续生成并受 `max_try_make_batch` 上限保护。
+  - RL dataset 改为通过共享 `build_prompt()` 构造 prompt，统一规范化 `problem_type`，修复大写 `OCR` 无法命中小写模板键的问题。
+- 新增下一轮独立配置 `config/rl/qwen3_rl_sftv9_reward_v2.yaml`，保持上一轮 KL/LR/reward shaping 不变，仅启用双重方差过滤、逐题型指标，并将 `save_freq` 与 `val_freq` 对齐为 25；使用新的输出目录，避免覆盖上一轮模型。
+- open-ended/OCR/regression 的 reward 公式重做仍需基于新增分桶指标做短程对照，暂不在没有 per-type baseline 的情况下同时改变多套 reward 尺度。
+
+## 2026-07-11
+
+### 新模型评测与结果归档
+
+- 完成 `TimeThinker-4B-RL-bs16-v9-van-500-new` 的主评测并将最新结果补入 `docs/eval.md`。
+- 对 `Evaluation/Eval` 中 v1/v2/v3/当前版本的差异做完整梳理：旧版本只用于历史结果解释，新实验统一走当前 `eval_bench.py`，避免多个相似入口继续分叉。
+- 整理 `Evaluation/results`、训练日志和模型命名，强调不能只凭目录名判断初始化模型或算法配置，必须同时核对 `experiment_config.json`。
+
+### RL reward 停滞问题定位
+
+- 检查 `TimeThinker-4B-RL-bs16-v9-van-500-new` 后确认：训练批 reward 不增长不能单独证明模型完全没学习，因为每步样本不同且日志包含过滤前候选。
+- 发现旧实验中部分配置虽然设置了 `kl_coef`，但 `disable_kl=true` 会使 reference worker 不存在，导致预期的 KL loss 实际没有生效。
+- 初步将效果瓶颈从“单纯学习率/KL 不合适”转向 reward 可辨别性、online filtering 有效组比例、题型评分规则和固定验证设计，为 7 月 12 日的受控 200-step 实验建立对照基线。
+
 ## 2026-07-10
 
 ### Eval 汇总与 Prompt 敏感性定位

@@ -1,0 +1,140 @@
+data:
+  train_files: EasyR1/data/timethinker_rl_train_split.json
+  val_files: EasyR1/data/timethinker_rl_val_512.json
+  prompt_key: problem
+  answer_key: answer
+  image_key: images
+  video_key: videos
+  image_dir: .
+  video_fps: 2.0
+  max_prompt_length: 16384
+  max_response_length: 768
+  rollout_batch_size: 16
+  mini_rollout_batch_size: null
+  val_batch_size: 16
+  format_prompt: null
+  override_chat_template: null
+  shuffle: true
+  seed: 1
+  min_pixels: 3136
+  max_pixels: 100352
+  filter_overlong_prompts: false
+
+algorithm:
+  adv_estimator: grpo
+  disable_kl: false
+  use_kl_loss: true
+  kl_penalty: low_var_kl
+  kl_coef: 1.0e-2
+  online_filtering: true
+  filter_key: accuracy
+  filter_low: 0.01
+  filter_high: 0.99
+  # Global fallback plus type-specific minimum ranking-signal requirements.
+  filter_key_min_std: 1.0e-3
+  filter_min_std: 1.0e-3
+  filter_type_min_std:
+    open_ended: 0.03
+    ocr: 0.02
+    regression: 0.05
+  filter_type_min_range:
+    open_ended: 0.08
+    ocr: 0.05
+    regression: 0.10
+  # v2 turned 14.7% raw open-ended data into 32.4% of actual updates.
+  filter_type_max_ratio:
+    open_ended: 0.25
+  # First rollout uses 16 prompts; refills use per-type keep-rate EMA estimates.
+  filter_adaptive_refill: true
+  filter_keep_rate_ema_alpha: 0.10
+  filter_keep_rate_default: 0.35
+  filter_type_initial_keep_rate:
+    multiple_choice: 0.30
+    numerical: 0.43
+    ocr: 0.50
+    open_ended: 0.50
+    regression: 0.60
+  filter_refill_oversample: 1.20
+  filter_refill_min_batch_size: 2
+  temporal: false
+  # Disable the v2 length bonus for a clean reward/filtering ablation.
+  len_control: false
+
+worker:
+  actor:
+    global_batch_size: 16
+    micro_batch_size_per_device_for_update: 1
+    micro_batch_size_per_device_for_experience: 1
+    max_grad_norm: 5.0
+    padding_free: true
+    dynamic_batching: true
+    ulysses_size: 1
+    model:
+      model_path: models/TimeThinker-4B-SFT-v9-10k-canonical
+      enable_gradient_checkpointing: true
+      trust_remote_code: true
+      freeze_vision_tower: false
+    optim:
+      lr: 1.0e-6
+      weight_decay: 1.0e-2
+      strategy: adamw_bf16
+      lr_warmup_ratio: 0.0
+    fsdp:
+      enable_full_shard: true
+      enable_cpu_offload: false
+      enable_rank0_init: true
+    offload:
+      offload_params: false
+      offload_optimizer: false
+
+  rollout:
+    n: 8
+    temperature: 1.0
+    top_p: 1.0
+    limit_images: 0
+    gpu_memory_utilization: 0.65
+    enforce_eager: false
+    enable_chunked_prefill: false
+    tensor_parallel_size: 4
+    disable_tqdm: true
+    max_num_batched_tokens: 20480
+    val_override_config:
+      temperature: 0.0
+      top_p: 1.0
+      n: 1
+
+  ref:
+    fsdp:
+      enable_full_shard: true
+      enable_cpu_offload: false
+      enable_rank0_init: true
+    offload:
+      offload_params: true
+
+  reward:
+    reward_type: batch
+    reward_function: EasyR1/verl/reward_function/timethinker_reward.py:compute_score
+    reward_function_kwargs:
+      format_weight: 0.05
+      formula_version: v3
+
+trainer:
+  total_epochs: 1
+  # First run a 25-step smoke test; only extend after checking per-type validation/filtering.
+  max_steps: 25
+  project_name: TimeThinker
+  experiment_name: rl_4b-sftv9-reward-v3-filter-balanced-smoke25-fixed
+  logger: ["file", "swanlab"]
+  nnodes: 1
+  n_gpus_per_node: 4
+  max_try_make_batch: 12
+  val_freq: 25
+  val_before_train: true
+  val_only: false
+  val_generations_to_log: 3
+  save_freq: 25
+  save_limit: 1
+  save_model_only: false
+  save_checkpoint_path: models/TimeThinker-4B-RL-sftv9-reward-v3-filter-balanced-smoke25-fixed
+  load_checkpoint_path: null
+  find_last_checkpoint: false

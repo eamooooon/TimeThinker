@@ -30,6 +30,9 @@ algorithm:
   filter_key: accuracy
   filter_low: 0.01
   filter_high: 0.99
+  # Require both answer-quality and actual outcome rewards to rank the rollouts.
+  filter_key_min_std: 1.0e-3
+  filter_min_std: 1.0e-3
   len_control: true
   len_reward: 0.1
   len_min: 180
